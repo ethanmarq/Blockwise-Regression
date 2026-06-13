@@ -38,6 +38,7 @@ for ss = 1:5
     L2=norm(X,2)^2/4;
     Ln = max(sum(X.^2,2)/4);
     w = w_init;
+    % ours1
     tic
     for i=1:T1*rate6
         % t_total = sum(abs(w),'all');
@@ -56,6 +57,7 @@ for ss = 1:5
     end
     
     w = w_init;
+    % ours2
     tic
     for i=1:T1*rate6
         % t_total = sum(abs(w),'all');
