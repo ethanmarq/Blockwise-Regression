@@ -10,7 +10,7 @@
 % 2 Classes:
 % - news20
 % - rcv1_train
-dataset    = 'mnist';
+dataset    = 'rcv1_train';
 data_path  = sprintf('/scratch/marque6/libsvm_data/%s.mat', dataset);
 lambda     = 1;            % L1 + L2 regularization weight  (try 1/sqrt(n))
 max_n      = 100000;        % subsample cap on #samples
@@ -67,8 +67,8 @@ Z = (Z - mu_Z) ./ sd_Z;
 
 % ----- objective:  F(w) = -loglik + lambda*||w||_1 + (lambda/2)*||w||^2 -----
 % (last row of w is pinned to 0: the softmax reference class)
-F = @(w) -trace(Z*w(y,:)') + sum(log(1 + sum(exp(w(1:k-1,:)*Z')))) ...
-         + lambda*sum(abs(w(:))) + 0.5*lambda*sum(w(:).^2);
+% F = @(w) -trace(Z*w(y,:)') + sum(log(1 + sum(exp(w(1:k-1,:)*Z')))) ...
+F = @(w) logistic_F(w, Z, y_b, k, lambda);
 
 % ----- gradient-Lipschitz constants (per solver) ---------------------------
 L_feat = sum(Z.^2, 1)/2 + lambda;           % 1 x m, per-feature   (F-CBPG)
@@ -78,3 +78,12 @@ L_samp = max(sum(Z.^2, 2)/2) + lambda/n;    % max row norm         (SVRG/SAGA)
 
 fprintf('L_feat(max)=%.3e, L_spec=%.3e, L_full=%.3e, L_samp=%.3e\n', ...
         max(L_feat), L_spec, L_full, L_samp);
+
+function val = logistic_F(w, Z, y_b, k, lambda)
+    S = w(1:k-1,:) * Z';
+    M = max(0, max(S, [], 1));                  % include reference logit (=0)
+    denom = exp(-M) + sum(exp(S - M), 1);
+    lin   = sum(sum(S .* y_b(:,1:k-1)'));       % sum_i s_{i,y_i} (0 if reference)
+    val = -lin + sum(M + log(denom)) ...
+          + lambda*sum(abs(w(:))) + 0.5*lambda*sum(w(:).^2);
+end

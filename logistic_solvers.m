@@ -99,10 +99,10 @@ fprintf('  done in %.1fs at iter %d, F=%.4e (inner=%d)\n', ...
 
 % === SAGA
 % SAGA with a stored per-sample gradient table; one "iteration" = one epoch.
-% table is (k-1) x m x n, may struggle on large datasets
+% table is (k-1) x m x n, may overflow
 fprintf('SAGA...\n');
 w = w_init;
-resid = softmax_tail(w, Z) - y_b(:,1:k-1)';
+resid = softmax_tail(w, Z) - y_b(:,1:k-1)';   % (k-1) x n residuals
 table = zeros(k-1, m, n);
 for i = 1:n, table(:,:,i) = resid(:,i)*Z(i,:); end
 avg  = mean(table, 3);
@@ -129,44 +129,135 @@ iter_saga = it;
 fprintf('  done in %.1fs at iter %d, F=%.4e, nnz(w)=%d/%d\n', ...
     T_saga(it), it, F_saga(it), nnz(w(1:k-1,:)), (k-1)*m);
 
-% === APPENDED Algorithms from Script 2
+% --- shared smooth oracle for the second-order methods (Option A) ----------
+% They optimize the SAME F as the prox methods, treating the L1 term via its
+% subgradient (lambda*sign(w)); the Hessian uses only the smooth (logistic+L2)
+% part. So they log the true F but won't drive weights to exact zeros.
 objfun = @(wv)    obj(wv, Z, y_b, k, lambda);     % [f, g, P] = objfun(wvec)
 hvpfun = @(P, u)  hvp(P, u, Z, lambda);           % Hessian-vector product
 x0     = w_init(1:k-1, :); x0 = x0(:);            % optimize the free block only
 cgmax  = 100;                                      % inner CG iterations
 
 % === L-BFGS
+% Limited-memory BFGS (two-loop recursion, O(d*mem) memory); L1 via subgradient.
 fprintf('L-BFGS...\n');
-[F_lbfgs, T_lbfgs] = run_lbfgs(objfun, x0, N, time_limit, 10);
-iter_lbfgs = numel(F_lbfgs);
-fprintf('  done in %.1fs at iter %d, F=%.4e\n', T_lbfgs(end), iter_lbfgs, F_lbfgs(end));
+mem = 10; c1 = 1e-4; eta = 2; maxbt = 40; d = numel(x0);
+x = x0; [f, g] = objfun(x);
+Sm = zeros(d,mem); Ym = zeros(d,mem); rhom = zeros(1,mem); cnt = 0;
+F_lbfgs = zeros(1,N); F_lbfgs(1) = f;
+T_lbfgs = zeros(1,N); T_lbfgs(1) = 0;
+tic
+for it = 2:N
+    q = g; al = zeros(1,cnt);                          % two-loop recursion
+    for i = cnt:-1:1
+        al(i) = rhom(i)*(Sm(:,i)'*q);  q = q - al(i)*Ym(:,i);
+    end
+    if cnt > 0, gamma = (Sm(:,cnt)'*Ym(:,cnt))/(Ym(:,cnt)'*Ym(:,cnt)); else, gamma = 1; end
+    r = gamma*q;
+    for i = 1:cnt
+        be = rhom(i)*(Ym(:,i)'*r);  r = r + Sm(:,i)*(al(i) - be);
+    end
+    p = -r;
+    [xn, fn, gn] = armijo(objfun, x, f, g, p, c1, eta, maxbt);
+    s = xn - x; yv = gn - g; sy = s'*yv;
+    if sy > 1e-12                                       % keep curvature positive
+        if cnt < mem, cnt = cnt + 1;
+        else
+            Sm = [Sm(:,2:end), zeros(d,1)];  Ym = [Ym(:,2:end), zeros(d,1)];
+            rhom = [rhom(2:end), 0];
+        end
+        Sm(:,cnt) = s; Ym(:,cnt) = yv; rhom(cnt) = 1/sy;
+    end
+    x = xn; f = fn; g = gn;
+    F_lbfgs(it) = f; T_lbfgs(it) = toc;
+    if T_lbfgs(it) >= time_limit, break; end
+end
+iter_lbfgs = it;
+fprintf('  done in %.1fs at iter %d, F=%.4e\n', T_lbfgs(it), iter_lbfgs, F_lbfgs(it));
 
 % === BFGS
+% Dense inverse-Hessian BFGS; O(d^2) memory -- small problems only.
 fprintf('BFGS...\n');
-[F_bfgs, T_bfgs] = run_bfgs(objfun, x0, N, time_limit);
-iter_bfgs = numel(F_bfgs);
-fprintf('  done in %.1fs at iter %d, F=%.4e\n', T_bfgs(end), iter_bfgs, F_bfgs(end));
+c1 = 1e-4; eta = 2; maxbt = 40; d = numel(x0);
+if d > 4000
+    warning('bfgs:mem', 'Dense BFGS uses a %dx%d inverse Hessian (~%.1f GB); prefer L-BFGS.', ...
+        d, d, 8*d^2/1e9);
+end
+x = x0; [f, g] = objfun(x);
+Hi = eye(d);
+F_bfgs = zeros(1,N); F_bfgs(1) = f;
+T_bfgs = zeros(1,N); T_bfgs(1) = 0;
+tic
+for it = 2:N
+    p = -Hi*g;
+    [xn, fn, gn] = armijo(objfun, x, f, g, p, c1, eta, maxbt);
+    s = xn - x; yv = gn - g; sy = s'*yv;
+    if sy > 1e-12
+        Hy = Hi*yv;
+        Hi = Hi + ((sy + yv'*Hy)/sy^2)*(s*s') - (Hy*s' + s*Hy')/sy;
+    end
+    x = xn; f = fn; g = gn;
+    F_bfgs(it) = f; T_bfgs(it) = toc;
+    if T_bfgs(it) >= time_limit, break; end
+end
+iter_bfgs = it;
+fprintf('  done in %.1fs at iter %d, F=%.4e\n', T_bfgs(it), iter_bfgs, F_bfgs(it));
 
 % === Newton-CG
+% Truncated Newton; Newton system solved matrix-free by CG via hvp.
 fprintf('Newton-CG...\n');
-[F_ncg, T_ncg] = run_newtoncg(objfun, hvpfun, x0, N, time_limit, cgmax);
-iter_ncg = numel(F_ncg);
-fprintf('  done in %.1fs at iter %d, F=%.4e\n', T_ncg(end), iter_ncg, F_ncg(end));
+c1 = 1e-4; eta = 2; maxbt = 40;
+x = x0; [f, g, P] = objfun(x);
+F_ncg = zeros(1,N); F_ncg(1) = f;
+T_ncg = zeros(1,N); T_ncg(1) = 0;
+tic
+for it = 2:N
+    p = newton_cg(hvpfun, P, g, cgmax);                % approx solve Hp = -g
+    [xn, fn, gn, Pn] = armijo(objfun, x, f, g, p, c1, eta, maxbt);
+    x = xn; f = fn; g = gn; P = Pn;
+    F_ncg(it) = f; T_ncg(it) = toc;
+    if T_ncg(it) >= time_limit, break; end
+end
+iter_ncg = it;
+fprintf('  done in %.1fs at iter %d, F=%.4e\n', T_ncg(it), iter_ncg, F_ncg(it));
 
 % === Trust-Region
+% Steihaug-CG subproblem with radius adaptation.
 fprintf('Trust-Region...\n');
-[F_tr, T_tr] = run_tr(objfun, hvpfun, x0, N, time_limit, cgmax);
-iter_tr = numel(F_tr);
-fprintf('  done in %.1fs at iter %d, F=%.4e\n', T_tr(end), iter_tr, F_tr(end));
+x = x0; [f, g, P] = objfun(x);
+Delta = 1; Dmax = 1e3; eta_acc = 0.1;
+F_tr = zeros(1,N); F_tr(1) = f;
+T_tr = zeros(1,N); T_tr(1) = 0;
+tic
+for it = 2:N
+    p  = steihaug(hvpfun, P, g, Delta, cgmax);
+    [ft, gt, Pt] = objfun(x + p);
+    Hp   = hvpfun(P, p);
+    pred = -(g'*p + 0.5*(p'*Hp));                      % predicted decrease
+    ared = f - ft;                                     % actual decrease
+    rho  = ared / max(pred, 1e-16);
+    if rho < 0.25
+        Delta = 0.25*Delta;
+    elseif rho > 0.75 && abs(norm(p) - Delta) < 1e-8*Delta
+        Delta = min(2*Delta, Dmax);
+    end
+    if rho > eta_acc                                   % accept step
+        x = x + p; f = ft; g = gt; P = Pt;
+    end
+    F_tr(it) = f; T_tr(it) = toc;
+    if T_tr(it) >= time_limit, break; end
+end
+iter_tr = it;
+fprintf('  done in %.1fs at iter %d, F=%.4e\n', T_tr(it), iter_tr, F_tr(it));
 
 % === PLOT
 algs = {'C-CBPG','F-CBPG','Whole','SVRG','SAGA','L-BFGS','BFGS','Newton-CG','Trust-Region'};
 Tc = {T_ccbpg(1:iter_ccbpg), T_fcbpg(1:iter_fcbpg), T_whole(1:iter_whole), ...
       T_svrg(1:iter_svrg),   T_saga(1:iter_saga), ...
-      T_lbfgs, T_bfgs, T_ncg, T_tr};
+      T_lbfgs(1:iter_lbfgs), T_bfgs(1:iter_bfgs), T_ncg(1:iter_ncg), T_tr(1:iter_tr)};
 Fc = {F_ccbpg(1:iter_ccbpg), F_fcbpg(1:iter_fcbpg), F_whole(1:iter_whole), ...
       F_svrg(1:iter_svrg),   F_saga(1:iter_saga), ...
-      F_lbfgs, F_bfgs, F_ncg, F_tr};
+      F_lbfgs(1:iter_lbfgs), F_bfgs(1:iter_bfgs), F_ncg(1:iter_ncg), F_tr(1:iter_tr)};
 
 if strcmp(x_mode, 'time')
     Xc = Tc;  xlbl = 'Time (s)';  xtag = 'time';
@@ -270,89 +361,7 @@ function [xn, fn, gn, Pn] = armijo(objfun, x, f, g, p, c1, eta, maxbt)
     xn = x + step*p;
 end
 
-% ----- L-BFGS (two-loop recursion; O(d*mem) memory) -------------------------
-function [Fh, Th] = run_lbfgs(objfun, x0, N, time_limit, mem)
-    c1 = 1e-4; eta = 2; maxbt = 40; d = numel(x0);
-    x = x0; [f, g] = objfun(x);
-    Sm = zeros(d,mem); Ym = zeros(d,mem); rhom = zeros(1,mem); cnt = 0;
-    Fh = zeros(1,N); Th = zeros(1,N); Fh(1) = f;
-    tic
-    for it = 2:N
-        q = g; al = zeros(1, cnt);
-        for i = cnt:-1:1
-            al(i) = rhom(i)*(Sm(:,i)'*q);  q = q - al(i)*Ym(:,i);
-        end
-        if cnt > 0
-            gamma = (Sm(:,cnt)'*Ym(:,cnt)) / (Ym(:,cnt)'*Ym(:,cnt));
-        else
-            gamma = 1;
-        end
-        r = gamma*q;
-        for i = 1:cnt
-            be = rhom(i)*(Ym(:,i)'*r);  r = r + Sm(:,i)*(al(i) - be);
-        end
-        p = -r;
-        [xn, fn, gn] = armijo(objfun, x, f, g, p, c1, eta, maxbt);
-        s = xn - x; yv = gn - g; sy = s'*yv;
-        if sy > 1e-12                                   % keep curvature positive
-            if cnt < mem, cnt = cnt + 1;
-            else
-                Sm = [Sm(:,2:end), zeros(d,1)];
-                Ym = [Ym(:,2:end), zeros(d,1)];
-                rhom = [rhom(2:end), 0];
-            end
-            Sm(:,cnt) = s; Ym(:,cnt) = yv; rhom(cnt) = 1/sy;
-        end
-        x = xn; f = fn; g = gn;
-        Fh(it) = f; Th(it) = toc;
-        if Th(it) >= time_limit, break; end
-    end
-    Fh = Fh(1:it); Th = Th(1:it);
-end
-
-% ----- BFGS (dense inverse Hessian; O(d^2) memory -- small problems only) ----
-function [Fh, Th] = run_bfgs(objfun, x0, N, time_limit)
-    c1 = 1e-4; eta = 2; maxbt = 40; d = numel(x0);
-    if d > 4000
-        warning('run_bfgs:mem', ...
-            'Dense BFGS uses a %dx%d inverse Hessian (~%.1f GB); prefer L-BFGS.', ...
-            d, d, 8*d^2/1e9);
-    end
-    x = x0; [f, g] = objfun(x);
-    Hi = eye(d);
-    Fh = zeros(1,N); Th = zeros(1,N); Fh(1) = f;
-    tic
-    for it = 2:N
-        p = -Hi*g;
-        [xn, fn, gn] = armijo(objfun, x, f, g, p, c1, eta, maxbt);
-        s = xn - x; yv = gn - g; sy = s'*yv;
-        if sy > 1e-12
-            Hy = Hi*yv;
-            Hi = Hi + ((sy + yv'*Hy)/sy^2)*(s*s') - (Hy*s' + s*Hy')/sy;
-        end
-        x = xn; f = fn; g = gn;
-        Fh(it) = f; Th(it) = toc;
-        if Th(it) >= time_limit, break; end
-    end
-    Fh = Fh(1:it); Th = Th(1:it);
-end
-
-% ----- Newton-CG (truncated Newton; matrix-free via hvp) --------------------
-function [Fh, Th] = run_newtoncg(objfun, hvpfun, x0, N, time_limit, cgmax)
-    c1 = 1e-4; eta = 2; maxbt = 40;
-    x = x0; [f, g, P] = objfun(x);
-    Fh = zeros(1,N); Th = zeros(1,N); Fh(1) = f;
-    tic
-    for it = 2:N
-        p = newton_cg(hvpfun, P, g, cgmax);
-        [xn, fn, gn, Pn] = armijo(objfun, x, f, g, p, c1, eta, maxbt);
-        x = xn; f = fn; g = gn; P = Pn;
-        Fh(it) = f; Th(it) = toc;
-        if Th(it) >= time_limit, break; end
-    end
-    Fh = Fh(1:it); Th = Th(1:it);
-end
-
+% ----- inner CG solve for Newton-CG -----------------------------------------
 function p = newton_cg(hvpfun, P, g, cgmax)
     p = zeros(numel(g),1); r = g; dvec = -r; rs = r'*r;
     tol = min(0.5, sqrt(norm(g))) * norm(g);    % forcing sequence
@@ -372,33 +381,7 @@ function p = newton_cg(hvpfun, P, g, cgmax)
     end
 end
 
-% ----- Trust-Region (Steihaug-CG subproblem) --------------------------------
-function [Fh, Th] = run_tr(objfun, hvpfun, x0, N, time_limit, cgmax)
-    x = x0; [f, g, P] = objfun(x);
-    Delta = 1; Dmax = 1e3; eta_acc = 0.1;
-    Fh = zeros(1,N); Th = zeros(1,N); Fh(1) = f;
-    tic
-    for it = 2:N
-        p  = steihaug(hvpfun, P, g, Delta, cgmax);
-        [ft, gt, Pt] = objfun(x + p);
-        Hp   = hvpfun(P, p);
-        pred = -(g'*p + 0.5*(p'*Hp));            % predicted decrease
-        ared = f - ft;                           % actual decrease
-        rho  = ared / max(pred, 1e-16);
-        if rho < 0.25
-            Delta = 0.25*Delta;
-        elseif rho > 0.75 && abs(norm(p) - Delta) < 1e-8*Delta
-            Delta = min(2*Delta, Dmax);
-        end
-        if rho > eta_acc                          % accept step
-            x = x + p; f = ft; g = gt; P = Pt;
-        end
-        Fh(it) = f; Th(it) = toc;
-        if Th(it) >= time_limit, break; end
-    end
-    Fh = Fh(1:it); Th = Th(1:it);
-end
-
+% ----- Steihaug-CG trust-region subproblem ----------------------------------
 function p = steihaug(hvpfun, P, g, Delta, cgmax)
     z = zeros(numel(g),1); r = g; dvec = -r; rs = r'*r;
     g0 = sqrt(rs);
