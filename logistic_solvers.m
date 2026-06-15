@@ -282,11 +282,6 @@ Fc = {F_ccbpg(1:iter_ccbpg), F_fcbpg(1:iter_fcbpg), F_whole(1:iter_whole), ...
       F_svrg(1:iter_svrg),   F_saga(1:iter_saga), ...
       F_lbfgs(1:iter_lbfgs), F_bfgs(1:iter_bfgs), F_ncg(1:iter_ncg), F_tr(1:iter_tr)};
 
-% Remove dropped algorithms
-keep   = ~cellfun(@isempty, Fc);
-algs   = algs(keep);  Tc = Tc(keep);  Fc = Fc(keep);  styles = styles(keep);
-
-
 if strcmp(x_mode, 'time')
     Xc = Tc;  xlbl = 'Time (s)';  xtag = 'time';
 else
@@ -296,6 +291,9 @@ end
 
 Fstar  = min(cellfun(@min, Fc));
 styles = {'-',':','-.','--',':','-','--','-.',':'};
+% Remove dropped algorithms
+keep   = ~cellfun(@isempty, Fc);
+algs   = algs(keep);  Tc = Tc(keep);  Fc = Fc(keep);  styles = styles(keep);
 
 % % START === log(F - F*) by xtag
 % figure('Visible','off'); hold on; grid on; set(gca,'FontSize',16);

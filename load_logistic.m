@@ -17,7 +17,7 @@ max_n      = 10000;        % subsample cap on #samples
 N          = 500;          % iterations (safety cap)
 time_limit = 15;         % time limit (s) per solver
 seed       = 0;
-x_mode     = 'iter';       % 'iter' or 'time'
+x_mode     = 'time';       % 'iter' or 'time'
 % === LOAD
 S = load(data_path);
 rng(seed);
