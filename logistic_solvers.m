@@ -33,18 +33,33 @@ fprintf('F-CBPG...\n');
 w = w_init;
 F_fcbpg = zeros(1, N); F_fcbpg(1) = F(w);
 T_fcbpg = zeros(1, N); T_fcbpg(1) = 0;
+
+Z  = sparse(Z);
+nz = cell(1, m);
+for h = 1:m
+    nz{h} = find(Z(:,h));
+end
+
+tic
+w = w_init;
+F_fcbpg = zeros(1, N); F_fcbpg(1) = F(w);
+T_fcbpg = zeros(1, N); T_fcbpg(1) = 0;
 tic
 for it = 2:N % t = 0 .. T, inplace eval
-    S = w(1:k-1,:) * Z';
-    for h = 1:m % i = 1 .. d
-        E = exp(S - max(0,max(S,[],1))); % stable softmax from cached logits
-        P = E ./ (exp(-max(0,max(S,[],1))) + sum(E,1)); % Gradient at W_{t,i-1}
-        dw = (P - y_b(:,1:k-1)')*Z(:,h) + lambda*w(1:k-1,h); % ∇_i f(W_{t,i-1})
+    S = w(1:k-1,:) * Z';                 % dense (k-1)x n, fine since k small
+    for h = 1:m
+        j  = nz{h};  if isempty(j), continue; end
+        Sj = S(:,j);
+        M  = max(0, max(Sj,[],1));
+        E  = exp(Sj - M);
+        Pj = E ./ (exp(-M) + sum(E,1)); % Gradient at W_{t,i-1}
+        dw = (Pj - y_b(j,1:k-1)')*Z(j,h) + lambda*w(1:k-1,h); % ∇_i f(W_{t,i-1})
         wold = w(1:k-1,h);
         t = wold - dw./L_feat(h); % W^i - (1/L_i) * ∇_i f
         w(1:k-1,h) = sign(t).*max(abs(t) - lambda./L_feat(h), 0); % prox_{g_i/L_i}, U_i dispears with inplace indexing
-        S = S + (w(1:k-1,h) - wold) * Z(:,h)'; % rank-1 logit update, O(nk)
+        S(:,j) = Sj + (w(1:k-1,h)-wold) * Z(j,h)';  % update only affected cols
     end
+
     F_fcbpg(it) = F(w); T_fcbpg(it) = toc;
     if T_fcbpg(it) >= time_limit, break; end
 end
