@@ -10,12 +10,12 @@
 % 2 Classes:
 % - news20
 % - rcv1_train
-dataset    = 'rcv1_train';
+% dataset    = 'news20';
 data_path  = sprintf('/scratch/marque6/libsvm_data/%s.mat', dataset);
 lambda     = 1;            % L1 + L2 regularization weight  (try 1/sqrt(n))
-max_n      = 100000;        % subsample cap on #samples
+max_n      = 10000;        % subsample cap on #samples
 N          = 500;          % iterations (safety cap)
-time_limit = 60;         % time limit (s) per solver
+time_limit = 15;         % time limit (s) per solver
 seed       = 0;
 x_mode     = 'iter';       % 'iter' or 'time'
 % === LOAD
