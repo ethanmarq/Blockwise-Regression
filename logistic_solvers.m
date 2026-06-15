@@ -35,11 +35,15 @@ F_fcbpg = zeros(1, N); F_fcbpg(1) = F(w);
 T_fcbpg = zeros(1, N); T_fcbpg(1) = 0;
 tic
 for it = 2:N % t = 0 .. T, inplace eval
+    S = w(1:k-1,:) * Z';
     for h = 1:m % i = 1 .. d
-        P  = softmax_tail(w, Z); % Gradient at W_{t,i-1}
+        E = exp(S - max(0,max(S,[],1))); % stable softmax from cached logits
+        P = E ./ (exp(-max(0,max(S,[],1))) + sum(E,1)); % Gradient at W_{t,i-1}
         dw = (P - y_b(:,1:k-1)')*Z(:,h) + lambda*w(1:k-1,h); % ∇_i f(W_{t,i-1})
-        t  = w(1:k-1,h) - dw/L_feat(h); % W^i - (1/L_i) * ∇_i f
-        w(1:k-1,h) = sign(t).*max(abs(t) - lambda/L_feat(h), 0); % prox_{g_i/L_i}, U_i dispears with inplace indexing
+        wold = w(1:k-1,h);
+        t = wold - dw./L_feat(h); % W^i - (1/L_i) * ∇_i f
+        w(1:k-1,h) = sign(t).*max(abs(t) - lambda./L_feat(h), 0); % prox_{g_i/L_i}, U_i dispears with inplace indexing
+        S = S + (w(1:k-1,h) - wold) * Z(:,h)'; % rank-1 logit update, O(nk)
     end
     F_fcbpg(it) = F(w); T_fcbpg(it) = toc;
     if T_fcbpg(it) >= time_limit, break; end
@@ -179,29 +183,33 @@ fprintf('  done in %.1fs at iter %d, F=%.4e\n', T_lbfgs(it), iter_lbfgs, F_lbfgs
 % Dense inverse-Hessian BFGS; O(d^2) memory -- small problems only.
 fprintf('BFGS...\n');
 c1 = 1e-4; eta = 2; maxbt = 40; d = numel(x0);
-if d > 4000
-    warning('bfgs:mem', 'Dense BFGS uses a %dx%d inverse Hessian (~%.1f GB); prefer L-BFGS.', ...
-        d, d, 8*d^2/1e9);
-end
-x = x0; [f, g] = objfun(x);
-Hi = eye(d);
-F_bfgs = zeros(1,N); F_bfgs(1) = f;
-T_bfgs = zeros(1,N); T_bfgs(1) = 0;
-tic
-for it = 2:N
-    p = -Hi*g;
-    [xn, fn, gn] = armijo(objfun, x, f, g, p, c1, eta, maxbt);
-    s = xn - x; yv = gn - g; sy = s'*yv;
-    if sy > 1e-12
-        Hy = Hi*yv;
-        Hi = Hi + ((sy + yv'*Hy)/sy^2)*(s*s') - (Hy*s' + s*Hy')/sy;
+bfgs_max_d = 8000;                                  % ~0.5 GB cap on the d x d Hi
+if d > bfgs_max_d
+    fprintf('  skipped: d=%d too large for a dense %dx%d inverse Hessian (~%.1f GB).\n', ...
+        d, d, d, 8*d^2/1e9);
+    F_bfgs = []; T_bfgs = []; iter_bfgs = 0;
+else
+    x = x0; [f, g] = objfun(x);
+    Hi = eye(d);
+    F_bfgs = zeros(1,N); F_bfgs(1) = f;
+    T_bfgs = zeros(1,N); T_bfgs(1) = 0;
+    tic
+    for it = 2:N
+        p = -Hi*g;
+        [xn, fn, gn] = armijo(objfun, x, f, g, p, c1, eta, maxbt);
+        s = xn - x; yv = gn - g; sy = s'*yv;
+        if sy > 1e-12
+            Hy = Hi*yv;
+            Hi = Hi + ((sy + yv'*Hy)/sy^2)*(s*s') - (Hy*s' + s*Hy')/sy;
+        end
+        x = xn; f = fn; g = gn;
+        F_bfgs(it) = f; T_bfgs(it) = toc;
+        if T_bfgs(it) >= time_limit, break; end
     end
-    x = xn; f = fn; g = gn;
-    F_bfgs(it) = f; T_bfgs(it) = toc;
-    if T_bfgs(it) >= time_limit, break; end
+    iter_bfgs = it;
+    F_bfgs = F_bfgs(1:iter_bfgs); T_bfgs = T_bfgs(1:iter_bfgs);
+    fprintf('  done in %.1fs at iter %d, F=%.4e\n', T_bfgs(end), iter_bfgs, F_bfgs(end));
 end
-iter_bfgs = it;
-fprintf('  done in %.1fs at iter %d, F=%.4e\n', T_bfgs(it), iter_bfgs, F_bfgs(it));
 
 % === Newton-CG
 % Truncated Newton; Newton system solved matrix-free by CG via hvp.
@@ -258,6 +266,11 @@ Tc = {T_ccbpg(1:iter_ccbpg), T_fcbpg(1:iter_fcbpg), T_whole(1:iter_whole), ...
 Fc = {F_ccbpg(1:iter_ccbpg), F_fcbpg(1:iter_fcbpg), F_whole(1:iter_whole), ...
       F_svrg(1:iter_svrg),   F_saga(1:iter_saga), ...
       F_lbfgs(1:iter_lbfgs), F_bfgs(1:iter_bfgs), F_ncg(1:iter_ncg), F_tr(1:iter_tr)};
+
+% Remove dropped algorithms
+keep   = ~cellfun(@isempty, Fc);
+algs   = algs(keep);  Tc = Tc(keep);  Fc = Fc(keep);  styles = styles(keep);
+
 
 if strcmp(x_mode, 'time')
     Xc = Tc;  xlbl = 'Time (s)';  xtag = 'time';
