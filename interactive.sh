@@ -1,5 +1,10 @@
 #!/usr/bin/env sh
 
+salloc --mem=512gb --cpus-per-task=32 --time=08:00:00
+module load matlab
+matlab -nodisplay
+dataset="mnist8m"; load_logistic; logistic_solvers
+
 salloc --mem=256gb --cpus-per-task=32 --time=08:00:00
 module load matlab
 matlab -nodisplay
