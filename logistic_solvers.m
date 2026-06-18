@@ -11,13 +11,13 @@ Yt = y_b(:,1:k-1)';                         % (k-1) x n one-hot tail
 
 % === BM-SVRG  (Block-Metric Prox-SVRG; per-feature metric + elastic-net prox)
 fprintf('BM-SVRG...\n');
-lambda1 = lambda/n;  lambda2 = lambda/n;     % => same minimizer as framework F
-Lj  = full(sum(Z.^2,1))'/(2*n) + lambda2;    % m x 1 per-feature metric (mean form)
+lam1 = lambda1/n;  lam2 = lambda2/n;     % => same minimizer as framework F
+Lj  = full(sum(Z.^2,1))'/(2*n) + lam2;    % m x 1 per-feature metric (mean form)
 Lj  = max(Lj, 1e-12);
 eta = 0.1;                                    % normalized step, theory needs < 1/5
 stepj = (eta ./ Lj).';                        % 1 x m
 beta    = 2*eta/(1-eta);
-mu_H    = lambda2/max(Lj);
+mu_H    = lam2/max(Lj);
 m_inner = floor((1/(eta*mu_H)+beta)/(1-2*beta)) + 1;
 w = w_init;
 F_bmsvrg = zeros(1,N); F_bmsvrg(1) = F(w);
@@ -34,7 +34,7 @@ for it = 2:N
         sWs = Ws(1:k-1,:)*zi';  Ms = max(0,max(sWs)); pWs = exp(sWs-Ms); pWs = pWs/(exp(-Ms)+sum(pWs));
         v = (pW - pWs)*zi + Gsnap;
         Wt = w(1:k-1,:) - stepj.*v;
-        w(1:k-1,:) = sign(Wt).*max(abs(Wt)-stepj*lambda1,0) ./ (1+stepj*lambda2);
+        w(1:k-1,:) = sign(Wt).*max(abs(Wt)-stepj*lam1,0) ./ (1+stepj*lam2);
         if mod(jj,1000)==0 && toc >= time_limit, stop = true; break; end
     end
     F_bmsvrg(it) = F(w); T_bmsvrg(it) = toc;
@@ -52,9 +52,9 @@ T_ccbpg = zeros(1, N); T_ccbpg(1) = 0;
 tic
 for it = 2:N
     for h = 1:k-1
-        G = logreg_grad(w, Z, y_b, lambda);
+        G = logreg_grad(w, Z, y_b, lambda2);
         t = w(h,:) - G(h,:)/L_spec;
-        w(h,:) = sign(t).*max(abs(t) - lambda/L_spec, 0);
+        w(h,:) = sign(t).*max(abs(t) - lambda1/L_spec, 0);
     end
     F_ccbpg(it) = F(w); T_ccbpg(it) = toc;
     if T_ccbpg(it) >= time_limit, break; end
@@ -79,10 +79,10 @@ for it = 2:N
         M  = max(0, max(Sj,[],1));
         E  = exp(Sj - M);
         Pj = E ./ (exp(-M) + sum(E,1));
-        dw = (Pj - y_b(j,1:k-1)')*Z(j,h) + lambda*w(1:k-1,h);
+        dw = (Pj - y_b(j,1:k-1)')*Z(j,h) + lambda2*w(1:k-1,h);
         wold = w(1:k-1,h);
         t = wold - dw./L_feat(h);
-        w(1:k-1,h) = sign(t).*max(abs(t) - lambda./L_feat(h), 0);
+        w(1:k-1,h) = sign(t).*max(abs(t) - lambda1./L_feat(h), 0);
         S(:,j) = Sj + (w(1:k-1,h)-wold) * Z(j,h)';
     end
     F_fcbpg(it) = F(w); T_fcbpg(it) = toc;
@@ -99,9 +99,9 @@ F_whole = zeros(1, N); F_whole(1) = F(w);
 T_whole = zeros(1, N); T_whole(1) = 0;
 tic
 for it = 2:N
-    G = logreg_grad(w, Z, y_b, lambda);
+    G = logreg_grad(w, Z, y_b, lambda2);
     t = w(1:k-1,:) - G/L_full;
-    w(1:k-1,:) = sign(t).*max(abs(t) - lambda/L_full, 0);
+    w(1:k-1,:) = sign(t).*max(abs(t) - lambda1/L_full, 0);
     F_whole(it) = F(w); T_whole(it) = toc;
     if T_whole(it) >= time_limit, break; end
 end
@@ -113,21 +113,21 @@ fprintf('  done in %.1fs at iter %d, F=%.4e, nnz(w)=%d/%d\n', ...
 fprintf('SVRG...\n');
 w = w_init; wt = w_init;
 step  = 0.1/L_samp;
-inner = ceil(100*L_samp/(lambda/n));
+inner = ceil(100*L_samp/(lambda2/n));
 F_svrg = zeros(1, N); F_svrg(1) = F(w);
 T_svrg = zeros(1, N); T_svrg(1) = 0;
 tic
 for it = 2:N
     w  = wt;
-    v  = logreg_grad(w, Z, y_b, 0)/n + lambda*w(1:k-1,:)/n;
+    v  = logreg_grad(w, Z, y_b, 0)/n + lambda2*w(1:k-1,:)/n;
     wt = w; wavg = zeros(size(w)); stop = false;
     for j = 1:inner
         rt = randi(n);
-        f1 = (softmax_tail(w,  Z(rt,:)) - y_b(rt,1:k-1)')*Z(rt,:) + lambda*w(1:k-1,:)/n;
-        f2 = (softmax_tail(wt, Z(rt,:)) - y_b(rt,1:k-1)')*Z(rt,:) + lambda*wt(1:k-1,:)/n;
+        f1 = (softmax_tail(w,  Z(rt,:)) - y_b(rt,1:k-1)')*Z(rt,:) + lambda2*w(1:k-1,:)/n;
+        f2 = (softmax_tail(wt, Z(rt,:)) - y_b(rt,1:k-1)')*Z(rt,:) + lambda2*wt(1:k-1,:)/n;
         vk = (f1 - f2) + v;
         wp = w(1:k-1,:) - step*vk;
-        w(1:k-1,:) = sign(wp).*max(abs(wp) - lambda*step/n, 0);
+        w(1:k-1,:) = sign(wp).*max(abs(wp) - lambda1*step/n, 0);
         wavg = (wavg*(j-1) + w)/j;
         if toc >= time_limit, stop = true; break; end
     end
@@ -155,11 +155,11 @@ for it = 2:N
     for s = 1:n
         j = randi(n);
         new_entry = (softmax_tail(w, Z(j,:)) - y_b(j,1:k-1)')*Z(j,:);
-        dir = (new_entry - table(:,:,j)) + avg + lambda*w(1:k-1,:);
+        dir = (new_entry - table(:,:,j)) + avg + lambda2*w(1:k-1,:);
         avg = avg + (new_entry - table(:,:,j))/n;
         table(:,:,j) = new_entry;
         t = w(1:k-1,:) - step*dir;
-        w(1:k-1,:) = sign(t).*max(abs(t) - lambda*step, 0);
+        w(1:k-1,:) = sign(t).*max(abs(t) - lambda1*step, 0);
         if toc >= time_limit, stop = true; break; end
     end
     F_saga(it) = F(w); T_saga(it) = toc;
@@ -194,10 +194,13 @@ for i = 1:numel(Fc)
 end
 ylim([Fstar - 5, max(cellfun(@max, Fc)) + 5]);
 xlabel(xlbl,'FontSize',20); ylabel('F','FontSize',20);
-title(sprintf('Logistic %s (n=%d, k=%d, \\lambda=%g)', ...
-      strrep(dataset,'_','\_'), n, k, lambda), 'FontSize', 20);
+title(sprintf('Logistic %s (n=%d, k=%d, \\lambda_1=%g, \\lambda_2=%g)', ...
+      strrep(dataset,'_','\_'), n, k, lambda1, lambda2), 'FontSize', 20);
+fname = sprintf('logistic_%s_n%d_k%d_l1_%.0e_l2_%.0e_%s.png', ...
+      dataset, n, k, lambda1, lambda2, xtag);
 legend(algs);
-fname = sprintf('logistic_%s_n%d_k%d_lam%.2f_%s.png', dataset, n, k, lambda, xtag);
+exportgraphics(gcf, fname, 'Resolution', 300);
+legend(algs);
 exportgraphics(gcf, fname, 'Resolution', 300);
 fprintf('Saved: %s\n', fname);
 
@@ -210,8 +213,8 @@ function P = softmax_tail(w, Z)
     P = E ./ (exp(-M) + sum(E, 1));
 end
 
-function G = logreg_grad(w, Z, y_b, lambda)
+function G = logreg_grad(w, Z, y_b, lambda2)
     k = size(w, 1);
     P = softmax_tail(w, Z);
-    G = (P - y_b(:,1:k-1)') * Z + lambda * w(1:k-1,:);
+    G = (P - y_b(:,1:k-1)') * Z + lambda2 * w(1:k-1,:);
 end
