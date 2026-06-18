@@ -13,7 +13,7 @@
 % dataset    = 'news20';
 data_path  = sprintf('/scratch/marque6/libsvm_data/%s.mat', dataset);
 lambda1 = 2;            % L1 + L2 regularization weight  (try 1/sqrt(n))
-lambda2 = 5;
+lambda2 = 500;
 max_n      = 100000;        % subsample cap on #samples
 N          = 50000;          % iterations (safety cap)
 time_limit = 15;         % time limit (s) per solver

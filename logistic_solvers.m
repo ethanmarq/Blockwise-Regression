@@ -12,8 +12,9 @@ Yt = y_b(:,1:k-1)';                         % (k-1) x n one-hot tail
 % === BM-SVRG  (Block-Metric Prox-SVRG; per-feature metric + elastic-net prox)
 fprintf('BM-SVRG...\n');
 lam1 = lambda1/n;  lam2 = lambda2/n;     % => same minimizer as framework F
-Lj  = full(sum(Z.^2,1))'/(2*n) + lam2;    % m x 1 per-feature metric (mean form)
-Lj  = max(Lj, 1e-12);
+% Lj  = full(sum(Z.^2,1))'/(2*n) + lam2;    % m x 1 per-feature metric (mean form)
+Lj = full(max(Z.^2,[],1))'/2 + lam2;
+% Lj  = max(Lj, 1e-12);
 eta = 0.1;                                    % normalized step, theory needs < 1/5
 stepj = (eta ./ Lj).';                        % 1 x m
 beta    = 2*eta/(1-eta);
