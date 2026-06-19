@@ -20,7 +20,7 @@ time_limit = 200; % time limit (s) per solver
 seed       = 0;
 x_mode     = 'time'; % 'iter' or 'time'
 standardize = false;
-add_bias = false;
+add_bias = true;
 remove_zero = false;
 % === LOAD
 S = load(data_path);
