@@ -12,13 +12,16 @@
 % - rcv1_train
 % dataset    = 'news20';
 data_path  = sprintf('/scratch/marque6/libsvm_data/%s.mat', dataset);
-lambda1 = 2;            % L1 + L2 regularization weight  (try 1/sqrt(n))
-lambda2 = 500;
-max_n      = 100000;        % subsample cap on #samples
-N          = 50000;          % iterations (safety cap)
-time_limit = 15;         % time limit (s) per solver
+lambda1 = 1; % L1 + L2 regularization weight  (try 1/sqrt(n))
+lambda2 = 1;
+max_n      = 500000; % subsample cap on #samples
+N          = 100; % iterations (safety cap)
+time_limit = 200; % time limit (s) per solver
 seed       = 0;
-x_mode     = 'time';       % 'iter' or 'time'
+x_mode     = 'time'; % 'iter' or 'time'
+standardize = false;
+add_bias = false;
+remove_zero = false;
 % === LOAD
 S = load(data_path);
 rng(seed);
@@ -57,14 +60,29 @@ k = max(y);
 y_b = zeros(n, k);                          % one-hot labels
 for c = 1:k, y_b(:,c) = (y == c); end
 
-fprintf('%s: %d samples x %d features, %d classes, nnz=%d\n', ...
-        dataset, n, m, k, nnz(Z));
+if remove_zero
+    nz = any(Z ~= 0, 1);                    % columns with >= 1 nonzero
+    n_dropped = m - nnz(nz);
+    Z = Z(:, nz);
+    m = size(Z, 2);
+    fprintf('Dropped %d all-zero feature columns (%d remain).\n', n_dropped, m);
+end
 
-% Standardize features, MNIST overflows
-mu_Z = mean(Z, 1);
-sd_Z = std(Z, 0, 1);  sd_Z(sd_Z == 0) = 1;
-% Z = (Z - mu_Z) ./ sd_Z;
-% Z = Z - mu_Z;
+if standardize
+    mu_Z = mean(Z, 1);
+    % sd_Z = std(Z, 0, 1);  sd_Z(sd_Z == 0) = 1;
+    % Z = (Z - mu_Z) ./ sd_Z;
+    Z = Z - mu_Z;
+end
+
+if add_bias
+    Z = [Z, ones(n, 1)];
+    m = m + 1;
+end
+
+fprintf('%s: %d samples x %d features (bias=%d), %d classes, nnz=%d\n', ...
+        dataset, n, m, add_bias, k, nnz(Z));
+
 
 
 % ----- objective:  F(w) = -loglik + lambda*||w||_1 + (lambda/2)*||w||^2 -----
@@ -75,7 +93,8 @@ sd_Z = std(Z, 0, 1);  sd_Z(sd_Z == 0) = 1;
 L_feat = sum(Z.^2, 1)/2 + lambda2;       % per-feature
 L_spec = norm(Z, 2)^2/4 + lambda2;       % spectral (C-CBPG)
 L_full = norm(Z, 2)^2/2 + lambda2;       % spectral (Whole)
-L_samp = max(sum(Z.^2, 2)/2) + lambda2;% max row norm (SVRG/SAGA)
+L_samp = max(sum(Z.^2, 2)/2) + lambda2; % max row norm (SVRG/SAGA)
+% L_samp = norm(Z.^2, 2)/2; % row norm (SVRG/SAGA)
 
 fprintf('L_feat(max)=%.3e, L_spec=%.3e, L_full=%.3e, L_samp=%.3e\n', ...
         max(L_feat), L_spec, L_full, L_samp);

@@ -12,9 +12,17 @@ Yt = y_b(:,1:k-1)';                         % (k-1) x n one-hot tail
 % === BM-SVRG  (Block-Metric Prox-SVRG; per-feature metric + elastic-net prox)
 fprintf('BM-SVRG...\n');
 lam1 = lambda1/n;  lam2 = lambda2/n;     % => same minimizer as framework F
-% Lj  = full(sum(Z.^2,1))'/(2*n) + lam2;    % m x 1 per-feature metric (mean form)
-Lj = full(max(Z.^2,[],1))'/2 + lam2;
+% Lj = full(max(Z.^2,[],1))'/2 + lam2;
+Lj  = full(sum(Z.^2,1))'/(2*n);    % m x 1 per-feature metric (mean form)
+% working SVRG = BM-SVRG
+% Lj = (max(full(sum(Z.^2,2)))/2) * ones(m,1);
 % Lj  = max(Lj, 1e-12);
+
+% Working, slighlty better than SVRG
+% rl1 = full(sum(abs(Z), 2));               % n×1  row L1 norms ‖z_i‖_1
+% Lj  = (max(abs(Z) .* rl1, [], 1).') / 2;  % m×1  per-feature metric
+Lj  = max(Lj, 1e-12);
+
 eta = 0.1;                                    % normalized step, theory needs < 1/5
 stepj = (eta ./ Lj).';                        % 1 x m
 beta    = 2*eta/(1-eta);
@@ -110,35 +118,42 @@ iter_whole = it; w_whole = w;
 fprintf('  done in %.1fs at iter %d, F=%.4e, nnz(w)=%d/%d\n', ...
     T_whole(it), it, F_whole(it), nnz(w(1:k-1,:)), (k-1)*m);
 
-% === SVRG  (Prox-SVRG: full-gradient snapshot per epoch + inner VR steps)
+% === SVRG  (BM-SVRG with a single global metric H = c·I, c = max_i||x_i||^2/2)
 fprintf('SVRG...\n');
-w = w_init; wt = w_init;
-step  = 0.1/L_samp;
-inner = ceil(100*L_samp/(lambda2/n));
-F_svrg = zeros(1, N); F_svrg(1) = F(w);
-T_svrg = zeros(1, N); T_svrg(1) = 0;
+lam1 = lambda1/n;  lam2 = lambda2/n;
+% c    = max(full(sum(Z.^2,2)))/2; % H(i,i) = max_i ||x_i||^2 / 2  (scalar)
+c = max(sum(Z.^2, 2)/2);
+% c = svds(Z, 1)^2 / 2;
+c    = max(c, 1e-12);
+eta  = 0.1;
+step = eta / c; % Only one scalar step
+beta    = 2*eta/(1-eta);
+mu_H    = lam2 / c;
+m_inner = floor((1/(eta*mu_H)+beta)/(1-2*beta)) + 1;
+w = w_init;
+F_svrg = zeros(1,N); F_svrg(1) = F(w);
+T_svrg = zeros(1,N); T_svrg(1) = 0;
 tic
+stop = false;
 for it = 2:N
-    w  = wt;
-    v  = logreg_grad(w, Z, y_b, 0)/n + lambda2*w(1:k-1,:)/n;
-    wt = w; wavg = zeros(size(w)); stop = false;
-    for j = 1:inner
-        rt = randi(n);
-        f1 = (softmax_tail(w,  Z(rt,:)) - y_b(rt,1:k-1)')*Z(rt,:) + lambda2*w(1:k-1,:)/n;
-        f2 = (softmax_tail(wt, Z(rt,:)) - y_b(rt,1:k-1)')*Z(rt,:) + lambda2*wt(1:k-1,:)/n;
-        vk = (f1 - f2) + v;
-        wp = w(1:k-1,:) - step*vk;
-        w(1:k-1,:) = sign(wp).*max(abs(wp) - lambda1*step/n, 0);
-        wavg = (wavg*(j-1) + w)/j;
-        if toc >= time_limit, stop = true; break; end
+    Ws    = w;
+    Gsnap = (softmax_tail(Ws,Z) - Yt)*Z / n;
+    for jj = 1:m_inner
+        i  = randi(n);
+        zi = Z(i,:);
+        sW  = w(1:k-1,:)*zi';   Mw = max(0,max(sW));  pW  = exp(sW-Mw);  pW  = pW /(exp(-Mw)+sum(pW));
+        sWs = Ws(1:k-1,:)*zi';  Ms = max(0,max(sWs)); pWs = exp(sWs-Ms); pWs = pWs/(exp(-Ms)+sum(pWs));
+        v  = (pW - pWs)*zi + Gsnap;
+        Wt = w(1:k-1,:) - step*v; % scalar step, whole matrix at once
+        w(1:k-1,:) = sign(Wt).*max(abs(Wt)-step*lam1,0) ./ (1+step*lam2);
+        if mod(jj,1000)==0 && toc >= time_limit, stop = true; break; end
     end
-    wt(1:k-1,:) = wavg(1:k-1,:);
     F_svrg(it) = F(w); T_svrg(it) = toc;
     if stop || T_svrg(it) >= time_limit, break; end
 end
 iter_svrg = it; w_svrg = w;
-fprintf('  done in %.1fs at iter %d, F=%.4e (inner=%d)\n', ...
-    T_svrg(it), it, F_svrg(it), inner);
+fprintf('  done in %.1fs at iter %d, F=%.4e, nnz=%d/%d (m_inner=%d)\n', ...
+    T_svrg(it), it, F_svrg(it), nnz(w(1:k-1,:)), (k-1)*m, m_inner);
 
 % === SAGA  (stored per-sample gradient table; one "iteration" = one epoch)
 fprintf('SAGA...\n');
