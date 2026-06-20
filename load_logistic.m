@@ -10,18 +10,20 @@
 % 2 Classes:
 % - news20
 % - rcv1_train
+
 % dataset    = 'news20';
 data_path  = sprintf('/scratch/marque6/libsvm_data/%s.mat', dataset);
-lambda1 = 1; % L1 + L2 regularization weight  (try 1/sqrt(n))
-lambda2 = 1;
+lambda1 = 1e-3; % L1 + L2 regularization weight
+lambda2 = 8e-3;
 max_n      = 500000; % subsample cap on #samples
 N          = 100; % iterations (safety cap)
-time_limit = 200; % time limit (s) per solver
+time_limit = 20; % time limit (s) per solver
 seed       = 0;
 x_mode     = 'time'; % 'iter' or 'time'
 standardize = false;
-add_bias = true;
-remove_zero = false;
+add_bias = false;
+remove_zero = true;
+
 % === LOAD
 S = load(data_path);
 rng(seed);
@@ -44,24 +46,24 @@ if size(Z,2) < size(y,2)
 end
 
 Z = full(Z);
-if ~isvector(y), [~, y] = max(y, [], 2); end  % one-hot matrix -> index vector
-y = double(y(:));                              % force column vector
-if size(Z,1) ~= numel(y), Z = Z'; end          % fix orientation if transposed
-[~, ~, y] = unique(y);                          % relabel to consecutive 1..k
+if ~isvector(y), [~, y] = max(y, [], 2); end % one-hot matrix -> index vector
+y = double(y(:)); % force column vector
+if size(Z,1) ~= numel(y), Z = Z'; end % fix orientation if transposed
+[~, ~, y] = unique(y); % relabel to consecutive 1..k
 
 [n, m] = size(Z);
-if n > max_n                                % subsample for tractability
+if n > max_n % subsample for tractability
     sel = randperm(n, max_n);
     Z = Z(sel,:);  y = y(sel);  n = max_n;
 end
-y = y(:);                                       % keep column after indexing
+y = y(:); % keep column after indexing
 k = max(y);
 
-y_b = zeros(n, k);                          % one-hot labels
+y_b = zeros(n, k); % one-hot labels
 for c = 1:k, y_b(:,c) = (y == c); end
 
 if remove_zero
-    nz = any(Z ~= 0, 1);                    % columns with >= 1 nonzero
+    nz = any(Z ~= 0, 1); % columns with >= 1 nonzero
     n_dropped = m - nnz(nz);
     Z = Z(:, nz);
     m = size(Z, 2);
@@ -83,29 +85,16 @@ end
 fprintf('%s: %d samples x %d features (bias=%d), %d classes, nnz=%d\n', ...
         dataset, n, m, add_bias, k, nnz(Z));
 
+% === Obj
+F = @(w) logistic_F(w, Z, y_b, k, lambda1, lambda2, n);
 
-
-% ----- objective:  F(w) = -loglik + lambda*||w||_1 + (lambda/2)*||w||^2 -----
-% (last row of w is pinned to 0: the softmax reference class)
-% F = @(w) -trace(Z*w(y,:)') + sum(log(1 + sum(exp(w(1:k-1,:)*Z')))) ...
-
-% ----- gradient-Lipschitz constants (per solver) ---------------------------
-L_feat = sum(Z.^2, 1)/2 + lambda2;       % per-feature
-L_spec = norm(Z, 2)^2/4 + lambda2;       % spectral (C-CBPG)
-L_full = norm(Z, 2)^2/2 + lambda2;       % spectral (Whole)
-L_samp = max(sum(Z.^2, 2)/2) + lambda2; % max row norm (SVRG/SAGA)
-% L_samp = norm(Z.^2, 2)/2; % row norm (SVRG/SAGA)
-
-fprintf('L_feat(max)=%.3e, L_spec=%.3e, L_full=%.3e, L_samp=%.3e\n', ...
-        max(L_feat), L_spec, L_full, L_samp);
-
-F = @(w) logistic_F(w, Z, y_b, k, lambda1, lambda2);
-
-function val = logistic_F(w, Z, y_b, k, lambda1, lambda2)
+function val = logistic_F(w, Z, y_b, k, lambda1, lambda2, n)
     S = w(1:k-1,:) * Z';
     M = max(0, max(S, [], 1));
     denom = exp(-M) + sum(exp(S - M), 1);
     lin   = sum(sum(S .* y_b(:,1:k-1)'));
-    val = -lin + sum(M + log(denom)) ...
-          + lambda1*sum(abs(w(:))) + 0.5*lambda2*sum(w(:).^2);
+    % Summed Form
+    % val = (-lin + sum(M + log(denom))) + lambda1*sum(abs(w(:))) + 0.5*lambda2*sum(w(:).^2);
+    % Averaged Form
+    val = (-lin + sum(M + log(denom)))/n + lambda1*sum(abs(w(:))) + 0.5*lambda2*sum(w(:).^2);
 end

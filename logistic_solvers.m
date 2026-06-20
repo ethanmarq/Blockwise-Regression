@@ -1,38 +1,57 @@
 % logistic_solvers.m
-% L1+L2 multinomial logistic regression, PROXIMAL solvers only.
+% L1+L2 multi
 % Every method here uses the soft-threshold prox, so each genuinely solves the
 % L1+L2 problem and produces exact zeros.
 % Expects Z, y, y_b, n, m, k, lambda, N, time_limit, x_mode, dataset, F,
 % and L_feat, L_spec, L_full, L_samp in the workspace (run load_logistic).
 
-w_init = randn(k, m); w_init(k,:) = 0;      % shared start; reference row = 0
-Z  = sparse(Z);                             % keep sparse for all solvers
-Yt = y_b(:,1:k-1)';                         % (k-1) x n one-hot tail
-
-% === BM-SVRG  (Block-Metric Prox-SVRG; per-feature metric + elastic-net prox)
-fprintf('BM-SVRG...\n');
-lam1 = lambda1/n;  lam2 = lambda2/n;     % => same minimizer as framework F
-
+% ===  gradient-Lipschitz constants (per solver)
+% NOTE: Remove n from F-CBPG, C-CBPG, Whole when using Summed Form
+% = F-CBPG
+L_feat = sum(Z.^2, 1)/(2*n) + lambda2;
+% = C-CBPG
+L_spec = norm(Z, 2)^2/(4*n) + lambda2;
+% = Whole
+L_full = norm(Z, 2)^2/(2*n) + lambda2;
+% = SAGA
+L_samp = max(sum(Z.^2, 2)/2) + lambda2;
+% = SVRG
+c = max(full(sum(Z.^2, 2)))/(2);
+c = max(c, 1e-12);
+% = BM-SVRG
 % Incorrect because lam2 in proximal
 % Lj = full(max(Z.^2,[],1))'/2 + lam2;
-%
-% Correct working for high lambda2
-Lj  = full(sum(Z.^2,1))'/(2*n);    % m x 1 per-feature metric (mean form)
-% Lj = full(sum(Z.^2,1))'/2;
-%
-% working SVRG = BM-SVRG
+
+% Working
+Lj  = full(sum(Z.^2,1))'/(2*n);
+Lj  = max(Lj, 1e-12);
+
+% Working SVRG = BM-SVRG
 % Lj = (max(full(sum(Z.^2,2)))/2) * ones(m,1);
 % Lj  = max(Lj, 1e-12);
 
-% Working, slighlty better than SVRG
-% rl1 = full(sum(abs(Z), 2));               % n×1  row L1 norms ‖z_i‖_1
-% Lj  = (max(abs(Z) .* rl1, [], 1).') / 2;  % m×1  per-feature metric
+% Experimental
+% rl1 = full(sum(abs(Z), 2));
+% Lj  = (max(abs(Z) .* rl1, [], 1).') / 2;
 % Lj  = max(Lj, 1e-12);
+% ===
+
+fprintf('L_feat(max)=%.3e, L_spec=%.3e, L_full=%.3e, L_samp=%.3e\n', ...
+        max(L_feat), L_spec, L_full, L_samp);
+
+w_init = randn(k, m); w_init(k,:) = 0; % shared start; reference row = 0
+Z  = sparse(Z); % keep sparse for all solvers
+Yt = y_b(:,1:k-1)'; % (k-1) x n one-hot tail
+
+% === BM-SVRG  (Block-Metric Prox-SVRG; per-feature metric + elastic-net prox)
+fprintf('BM-SVRG...\n');
+lam1 = lambda1; lam2 = lambda2;
+
 
 fprintf(' max Lj=%.3e',max(Lj));
 
-eta = 0.1;                                    % normalized step, theory needs < 1/5
-stepj = (eta ./ Lj).';                        % 1 x m
+eta = 0.1; % Theory requies eta < 1/5
+stepj = (eta ./ Lj).'; % 1 x m
 beta    = 2*eta/(1-eta);
 mu_H    = lam2/max(Lj);
 m_inner = floor((1/(eta*mu_H)+beta)/(1-2*beta)) + 1;
@@ -96,7 +115,10 @@ for it = 2:N
         M  = max(0, max(Sj,[],1));
         E  = exp(Sj - M);
         Pj = E ./ (exp(-M) + sum(E,1));
-        dw = (Pj - y_b(j,1:k-1)')*Z(j,h) + lambda2*w(1:k-1,h);
+        % Summed Form
+        % dw = (Pj - y_b(j,1:k-1)')*Z(j,h) + lambda2*w(1:k-1,h);
+        % Averaged Form
+        dw = (Pj - y_b(j,1:k-1)')*Z(j,h)/n + lambda2*w(1:k-1,h);
         wold = w(1:k-1,h);
         t = wold - dw./L_feat(h);
         w(1:k-1,h) = sign(t).*max(abs(t) - lambda1./L_feat(h), 0);
@@ -126,13 +148,9 @@ iter_whole = it; w_whole = w;
 fprintf('  done in %.1fs at iter %d, F=%.4e, nnz(w)=%d/%d\n', ...
     T_whole(it), it, F_whole(it), nnz(w(1:k-1,:)), (k-1)*m);
 
-% === SVRG  (BM-SVRG with a single global metric H = c·I, c = max_i||x_i||^2/2)
+% === SVRG  (BM-SVRG with a single global metric H = c·I
 fprintf('SVRG...\n');
-lam1 = lambda1/n;  lam2 = lambda2/n;
-% c    = max(full(sum(Z.^2,2)))/2; % H(i,i) = max_i ||x_i||^2 / 2  (scalar)
-c = max(sum(Z.^2, 2)/2);
-% c = svds(Z, 1)^2 / 2;
-c    = max(c, 1e-12);
+lam1 = lambda1; lam2 = lambda2;
 eta  = 0.1;
 step = eta / c; % Only one scalar step
 beta    = 2*eta/(1-eta);
@@ -238,7 +256,8 @@ function P = softmax_tail(w, Z)
 end
 
 function G = logreg_grad(w, Z, y_b, lambda2)
+    n  = size(Z, 1);
     k = size(w, 1);
     P = softmax_tail(w, Z);
-    G = (P - y_b(:,1:k-1)') * Z + lambda2 * w(1:k-1,:);
+    G = (P - y_b(:,1:k-1)') * Z/n + lambda2 * w(1:k-1,:);
 end
