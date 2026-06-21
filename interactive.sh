@@ -16,7 +16,7 @@ matlab -nodisplay
 dataset="rcv1_train"; load_logistic; logistic_solvers
 
 
-# MATLAB
+
 for l2 = [1, 10, 100, 1000]
     lam2_mean = l2/n;
     Lj_test = full(sum(Z.^2,1))'/(2*n) + lam2_mean;

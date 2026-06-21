@@ -13,14 +13,14 @@
 
 % dataset    = 'news20';
 data_path  = sprintf('/scratch/marque6/libsvm_data/%s.mat', dataset);
-lambda1 = 1e-3; % L1 + L2 regularization weight
-lambda2 = 8e-3;
+lambda1 = 1; % L1 + L2 regularization weight
+lambda2 = 1;
 max_n      = 500000; % subsample cap on #samples
 N          = 100; % iterations (safety cap)
 time_limit = 20; % time limit (s) per solver
 seed       = 0;
 x_mode     = 'time'; % 'iter' or 'time'
-standardize = false;
+standardize = true;
 add_bias = false;
 remove_zero = true;
 
@@ -72,9 +72,9 @@ end
 
 if standardize
     mu_Z = mean(Z, 1);
-    % sd_Z = std(Z, 0, 1);  sd_Z(sd_Z == 0) = 1;
-    % Z = (Z - mu_Z) ./ sd_Z;
-    Z = Z - mu_Z;
+    sd_Z = std(Z, 0, 1);  sd_Z(sd_Z == 0) = 1;
+    Z = (Z - mu_Z) ./ sd_Z;
+    % Z = Z - mu_Z;
 end
 
 if add_bias

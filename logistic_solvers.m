@@ -12,7 +12,10 @@ L_feat = sum(Z.^2, 1)/(2*n) + lambda2;
 % = C-CBPG
 L_spec = norm(Z, 2)^2/(4*n) + lambda2;
 % = Whole
-L_full = norm(Z, 2)^2/(2*n) + lambda2;
+% Without STD
+% L_full = norm(Z, 2)^2/(2*n) + lambda2;
+% With STD
+L_full = 1/n + lambda2;
 % = SAGA
 L_samp = max(sum(Z.^2, 2)/2) + lambda2;
 % = SVRG
