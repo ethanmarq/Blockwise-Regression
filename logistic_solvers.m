@@ -19,7 +19,7 @@ L_full = 1/n + lambda2;
 % = SAGA
 L_samp = max(sum(Z.^2, 2)/2) + lambda2;
 % = SVRG
-c = max(full(sum(Z.^2, 2)))/(2);
+c = max(full(sum(Z.^2, 2)))/(2*n);
 c = max(c, 1e-12);
 % = BM-SVRG
 % Incorrect because lam2 in proximal
