@@ -1,0 +1,637 @@
+function results = run_mlr_comparison_all(matFile, opts)
+%RUN_MLR_COMPARISON_ALL Compare proximal methods for elastic-net MLR.
+%
+% Minimal usage:
+%   results = run_mlr_comparison_all('your_data.mat');
+%
+% The .mat file should ideally contain:
+%   X   % n-by-d data matrix
+%   y   % n-by-1 labels
+%
+% Objective:
+%   F(W) = (1/n) sum_i softmax_loss_i(W)
+%          + lambda1 * ||W||_1
+%          + lambda2/2 * ||W||_F^2
+%
+% Compared methods:
+%   1. Feature-wise cyclic block proximal gradient
+%   2. Class-wise cyclic block proximal gradient
+%   3. Whole-matrix proximal gradient
+%   4. Block-Metric Prox-SVRG, feature-row metric
+%   5. Whole-matrix Prox-SVRG
+%
+% Outputs in opts.outDir:
+%   objective_vs_iteration.png
+%   objective_vs_time.png
+%   one CSV history file per method
+%   results.mat
+%
+% Optional opts fields:
+%   opts.lambda1       default 1e-2
+%   opts.lambda2       default 1e-1
+%   opts.maxEpochs     default 100       % for feature/class BPG
+%   opts.maxIterWhole  default 300      % for whole PG
+%   opts.maxEpochsSVRG default 100       % for both SVRG methods
+%   opts.innerSVRG     default []       % if empty, uses 2*n
+%   opts.eta           default 1.0      % PG/BPG damping, step = eta/L
+%   opts.etaSVRG       default 0.1      % SVRG damping
+%   opts.standardize   default false
+%   opts.addIntercept  default false
+%   opts.seed          default 1
+%   opts.outDir        default 'mlr_results_all'
+%   opts.evalEvery     default 1
+%   opts.verbose       default true
+%
+% Lipschitz constants for the averaged loss:
+%   whole PG:       L = ||X||_2^2 / (2n)
+%   class-wise BPG: L = ||X||_2^2 / (4n)
+%   feature BPG:    L_j = ||X(:,j)||_2^2 / (2n)
+%
+% SVRG component-loss constants:
+%   whole Prox-SVRG:       L_i <= ||x_i||_2^2 / 2, so L = max_i ||x_i||^2 / 2
+%   Block-Metric Prox-SVRG: H_j = max_i x_ij^2 / 2
+
+    if nargin < 2
+        opts = struct();
+    end
+    opts = fill_default_opts(opts);
+    rng(opts.seed);
+
+    if ~exist(opts.outDir, 'dir')
+        mkdir(opts.outDir);
+    end
+
+    [X, y] = load_xy_from_mat(matFile);
+    [X, y] = preprocess_xy(X, y, opts);
+
+    n = size(X,1);
+    d = size(X,2);
+    K = max(y);
+
+    fprintf('Loaded data: n = %d, d = %d, K = %d\n', n, d, K);
+    fprintf('Objective: average softmax loss + %.3e ||W||_1 + %.3e/2 ||W||_F^2\n', ...
+        opts.lambda1, opts.lambda2);
+
+    W0 = zeros(d, K);
+
+    results = struct();
+    results.opts = opts;
+    results.matFile = matFile;
+
+    fprintf('\n[1/5] Running feature-wise cyclic BPG...\n');
+    results.featurewise = featurewise_bpg_mlr(X, y, W0, opts);
+
+    fprintf('\n[2/5] Running class-wise cyclic BPG...\n');
+    results.classwise = classwise_bpg_mlr(X, y, W0, opts);
+
+    fprintf('\n[3/5] Running whole-matrix proximal gradient...\n');
+    results.whole_pg = whole_prox_gradient_mlr(X, y, W0, opts);
+
+    fprintf('\n[4/5] Running Block-Metric Prox-SVRG...\n');
+    results.block_metric_prox_svrg = block_metric_prox_svrg_mlr(X, y, W0, opts);
+
+    fprintf('\n[5/5] Running whole-matrix Prox-SVRG...\n');
+    results.whole_prox_svrg = whole_prox_svrg_mlr(X, y, W0, opts);
+
+    save_histories_and_plots(results, opts.outDir);
+
+    save(fullfile(opts.outDir, 'results.mat'), 'results', '-v7.3');
+    fprintf('\nDone. Results saved to folder: %s\n', opts.outDir);
+end
+
+
+function opts = fill_default_opts(opts)
+    opts = set_default(opts, 'lambda1', 1e-2);
+    opts = set_default(opts, 'lambda2', 1e-1);
+    opts = set_default(opts, 'maxEpochs', 100);
+    opts = set_default(opts, 'maxIterWhole', 300);
+    opts = set_default(opts, 'maxEpochsSVRG', 10);
+    opts = set_default(opts, 'innerSVRG', []);
+    opts = set_default(opts, 'eta', 1.0);
+    opts = set_default(opts, 'etaSVRG', 0.1);
+    opts = set_default(opts, 'standardize', false);
+    opts = set_default(opts, 'addIntercept', false);
+    opts = set_default(opts, 'seed', 1);
+    opts = set_default(opts, 'outDir', 'mlr_results_all');
+    opts = set_default(opts, 'evalEvery', 1);
+    opts = set_default(opts, 'verbose', true);
+end
+
+
+function opts = set_default(opts, name, value)
+    if ~isfield(opts, name) || isempty(opts.(name))
+        opts.(name) = value;
+    end
+end
+
+
+function [X, y] = load_xy_from_mat(matFile)
+    S = load(matFile);
+
+    xCandidates = {'Z', 'X', 'data', 'features', 'A', 'x'};
+    yCandidates = {'y', 'Y', 'labels', 'label', 'target', 'targets'};
+
+    X = [];
+    y = [];
+
+    for i = 1:numel(xCandidates)
+        nm = xCandidates{i};
+        if isfield(S, nm)
+            X = S.(nm);
+            break;
+        end
+    end
+
+    for i = 1:numel(yCandidates)
+        nm = yCandidates{i};
+        if isfield(S, nm)
+            yy = S.(nm);
+            if isnumeric(yy) || islogical(yy)
+                if isvector(yy)
+                    y = yy;
+                    break;
+                elseif ismatrix(yy) && size(yy,1) == size(X,1) && size(yy,2) > 1
+                    [~, y] = max(yy, [], 2);
+                    break;
+                end
+            end
+        end
+    end
+
+    if isempty(X) || isempty(y)
+        names = fieldnames(S);
+        numericNames = {};
+        for i = 1:numel(names)
+            val = S.(names{i});
+            if isnumeric(val) || islogical(val)
+                numericNames{end+1} = names{i}; %#ok<AGROW>
+            end
+        end
+
+        for i = 1:numel(numericNames)
+            A = S.(numericNames{i});
+            if ismatrix(A) && ~isvector(A)
+                for j = 1:numel(numericNames)
+                    b = S.(numericNames{j});
+                    if isvector(b) && numel(b) == size(A,1)
+                        X = A;
+                        y = b;
+                        break;
+                    end
+                end
+            end
+            if ~isempty(X) && ~isempty(y)
+                break;
+            end
+        end
+    end
+
+    if isempty(X) || isempty(y)
+        error(['Could not automatically identify X and y in %s. ', ...
+               'Please store variables as X and y, or edit load_xy_from_mat().'], matFile);
+    end
+
+    X = double(X);
+    y = double(y(:));
+end
+
+
+
+function [X, y] = preprocess_xy(X, y, opts)
+    if size(X,1) ~= numel(y) && size(X,2) == numel(y)
+        X = X';
+    end
+    if size(X,1) ~= numel(y)
+        error('X and y dimensions do not match.');
+    end
+
+    [~, ~, y] = unique(y);
+    y = double(y(:));
+
+    if opts.standardize
+        if issparse(X)
+            colScale = sqrt(sum(X.^2, 1) / max(1, size(X,1)));
+            colScale = full(colScale);
+            colScale(colScale < 1e-12) = 1;
+            X = X * spdiags(1 ./ colScale(:), 0, size(X,2), size(X,2));
+        else
+            mu = mean(X, 1);
+            sigma = std(X, 0, 1);
+            sigma(sigma < 1e-12) = 1;
+            X = bsxfun(@rdivide, bsxfun(@minus, X, mu), sigma);
+        end
+    end
+
+    if opts.addIntercept
+        X = [X, ones(size(X,1), 1)];
+    end
+end
+
+
+function out = featurewise_bpg_mlr(X, y, W, opts)
+    n = size(X,1);
+    d = size(X,2);
+    K = size(W,2);
+    lambda1 = opts.lambda1;
+    lambda2 = opts.lambda2;
+
+    Y = one_hot_labels(y, K);
+    Z = X * W;
+
+    L = full(sum(X.^2, 1))' / (2*n);
+    L = max(L, 1e-14);
+
+    hist = init_hist();
+    t0 = tic;
+    hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
+
+    iterCount = 0;
+    for epoch = 1:opts.maxEpochs
+        for j = 1:d
+            P = softmax_rows(Z);
+            gj = X(:,j)' * (P - Y) / n;
+
+            alpha = opts.eta / L(j);
+            oldRow = W(j,:);
+            newRow = elastic_net_prox(oldRow - alpha * gj, alpha, lambda1, lambda2);
+            delta = newRow - oldRow;
+
+            W(j,:) = newRow;
+            Z = Z + X(:,j) * delta;
+            iterCount = iterCount + 1;
+        end
+
+        if mod(epoch, opts.evalEvery) == 0 || epoch == opts.maxEpochs
+            hist = record_hist(hist, y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
+            maybe_print(opts, 'featurewise', epoch, hist.obj(end));
+        end
+    end
+
+    out.W = W;
+    out.hist = hist;
+    out.L = L;
+end
+
+
+function out = classwise_bpg_mlr(X, y, W, opts)
+    n = size(X,1);
+    K = size(W,2);
+    lambda1 = opts.lambda1;
+    lambda2 = opts.lambda2;
+
+    Y = one_hot_labels(y, K);
+    Z = X * W;
+
+    L = spectral_norm_sq(X) / (4*n);
+    L = max(L, 1e-14);
+    alpha = opts.eta / L;
+
+    hist = init_hist();
+    t0 = tic;
+    hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
+
+    iterCount = 0;
+    for epoch = 1:opts.maxEpochs
+        for k = 1:K
+            P = softmax_rows(Z);
+            gk = X' * (P(:,k) - Y(:,k)) / n;
+
+            oldCol = W(:,k);
+            newCol = elastic_net_prox(oldCol - alpha * gk, alpha, lambda1, lambda2);
+            delta = newCol - oldCol;
+
+            W(:,k) = newCol;
+            Z(:,k) = Z(:,k) + X * delta;
+            iterCount = iterCount + 1;
+        end
+
+        if mod(epoch, opts.evalEvery) == 0 || epoch == opts.maxEpochs
+            hist = record_hist(hist, y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
+            maybe_print(opts, 'classwise', epoch, hist.obj(end));
+        end
+    end
+
+    out.W = W;
+    out.hist = hist;
+    out.L = L;
+    out.alpha = alpha;
+end
+
+
+function out = whole_prox_gradient_mlr(X, y, W, opts)
+    n = size(X,1);
+    lambda1 = opts.lambda1;
+    lambda2 = opts.lambda2;
+
+    Z = X * W;
+    Y = one_hot_labels(y, size(W,2));
+
+    L = spectral_norm_sq(X) / (2*n);
+    L = max(L, 1e-14);
+    alpha = opts.eta / L;
+
+    hist = init_hist();
+    t0 = tic;
+    hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
+
+    for it = 1:opts.maxIterWhole
+        P = softmax_rows(Z);
+        G = X' * (P - Y) / n;
+
+        W = elastic_net_prox(W - alpha * G, alpha, lambda1, lambda2);
+        Z = X * W;
+
+        if mod(it, opts.evalEvery) == 0 || it == opts.maxIterWhole
+            hist = record_hist(hist, y, W, Z, lambda1, lambda2, it, toc(t0), it);
+            maybe_print(opts, 'whole-pg', it, hist.obj(end));
+        end
+    end
+
+    out.W = W;
+    out.hist = hist;
+    out.L = L;
+    out.alpha = alpha;
+end
+
+
+function out = block_metric_prox_svrg_mlr(X, y, W, opts)
+    n = size(X,1);
+    d = size(X,2);
+    K = size(W,2);
+    lambda1 = opts.lambda1;
+    lambda2 = opts.lambda2;
+
+    if isempty(opts.innerSVRG)
+        m = 2*n;
+    else
+        m = opts.innerSVRG;
+    end
+
+    % Feature-row metric for individual losses.
+    H = 0.5 * full(max(X.^2, [], 1))';
+    % rl1 = full(sum(abs(X), 2)); % n x 1, ||x_i||_1
+    % H   = 0.5 * full(max(abs(X) .* rl1, [], 1))'; % d x 1, valid per-feature metric
+    % H   = max(H, 1e-14);
+    % Lj  = full(sum(Z.^2,1))'/(2);
+    % H = 0.5 * max(full(sum(X.^2,2))) * ones(d,1);
+    % H = full(sum(X.^2,1))'/(2);
+    H = max(H, 1e-14);
+
+    hist = init_hist();
+    Z = X * W;
+    t0 = tic;
+    hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
+
+    % beta    = 2*eta/(1-eta);
+    % mu_H    = lam2/max(Lj);
+    % m_inner = floor((1/(eta*mu_H)+beta)/(1-2*beta)) + 1;
+
+    beta = (2*opts.etaSVRG)/(1-opts.etaSVRG);
+    mu_h = opts.lambda2 / max(H);
+    m = floor((1/(opts.etaSVRG*mu_h)+beta)/(1-2*beta)) + 1;
+
+    iterCount = 0;
+    for epoch = 1:opts.maxEpochsSVRG
+        Wsnap = W;
+        Zsnap = X * Wsnap;
+        Psnap = softmax_rows(Zsnap);
+        Yall = one_hot_labels(y, K);
+        fullGradSnap = X' * (Psnap - Yall) / n;
+
+        for t = 1:m
+            i = randi(n);
+            xi = X(i,:);
+
+            pi = softmax_rows(xi * W);
+            pis = softmax_rows(xi * Wsnap);
+
+            yi = zeros(1, K);
+            yi(y(i)) = 1;
+
+            grad_i_cur = xi' * (pi - yi);
+            grad_i_snap = xi' * (pis - yi);
+            v = grad_i_cur - grad_i_snap + fullGradSnap;
+
+            % Full block-metric proximal update, decomposed across feature rows.
+            % for j = 1:d
+            %     alpha_j = opts.etaSVRG / H(j);
+            %     W(j,:) = elastic_net_prox(W(j,:) - alpha_j * v(j,:), alpha_j, lambda1, lambda2);
+            % end
+            % d x 1, per-row step sizes
+            alpha = opts.etaSVRG ./ H(:);
+            % d x K, broadcast over rows
+            A = W - alpha .* v;
+            W = sign(A) .* max(abs(A) - alpha*lambda1, 0) ./ (1 + alpha*lambda2);
+
+            iterCount = iterCount + 1;
+        end
+
+        Z = X * W;
+        hist = record_hist(hist, y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
+        maybe_print(opts, 'bm-prox-svrg', epoch, hist.obj(end));
+    end
+
+    out.W = W;
+    out.hist = hist;
+    out.H = H;
+    out.innerSVRG = m;
+end
+
+
+function out = whole_prox_svrg_mlr(X, y, W, opts)
+    n = size(X,1);
+    K = size(W,2);
+    lambda1 = opts.lambda1;
+    lambda2 = opts.lambda2;
+
+    if isempty(opts.innerSVRG)
+        m = 2*n;
+    else
+        m = opts.innerSVRG;
+    end
+
+    % Uniform component-loss smoothness bound:
+    % ||nabla loss_i(W)-nabla loss_i(V)|| <= L_i ||W-V||_F,
+    % L_i <= ||x_i||^2 / 2.
+    rowNormSq = full(sum(X.^2, 2));
+    L = 0.5 * max(rowNormSq);
+    L = max(L, 1e-14);
+    alpha = opts.etaSVRG / L;
+
+    beta = (2*opts.etaSVRG)/(1-opts.etaSVRG);
+    mu_h = opts.lambda2 / max(L);
+    m = floor((1/(opts.etaSVRG*mu_h)+beta)/(1-2*beta)) + 1;
+
+
+    hist = init_hist();
+    Z = X * W;
+    t0 = tic;
+    hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
+
+    iterCount = 0;
+    for epoch = 1:opts.maxEpochsSVRG
+        Wsnap = W;
+        Zsnap = X * Wsnap;
+        Psnap = softmax_rows(Zsnap);
+        Yall = one_hot_labels(y, K);
+        fullGradSnap = X' * (Psnap - Yall) / n;
+
+        for t = 1:m
+            i = randi(n);
+            xi = X(i,:);
+
+            pi = softmax_rows(xi * W);
+            pis = softmax_rows(xi * Wsnap);
+
+            yi = zeros(1, K);
+            yi(y(i)) = 1;
+
+            grad_i_cur = xi' * (pi - yi);
+            grad_i_snap = xi' * (pis - yi);
+
+            v = grad_i_cur - grad_i_snap + fullGradSnap;
+
+            % Whole-matrix Prox-SVRG update.
+            W = elastic_net_prox(W - alpha * v, alpha, lambda1, lambda2);
+            iterCount = iterCount + 1;
+        end
+
+        Z = X * W;
+        hist = record_hist(hist, y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
+        maybe_print(opts, 'whole-prox-svrg', epoch, hist.obj(end));
+    end
+
+    out.W = W;
+    out.hist = hist;
+    out.L = L;
+    out.alpha = alpha;
+    out.innerSVRG = m;
+end
+
+
+function P = softmax_rows(Z)
+    Zmax = max(Z, [], 2);
+    Zs = bsxfun(@minus, Z, Zmax);
+    E = exp(Zs);
+    P = bsxfun(@rdivide, E, sum(E, 2));
+end
+
+
+function Y = one_hot_labels(y, K)
+    n = numel(y);
+    Y = zeros(n, K);
+    Y(sub2ind([n, K], (1:n)', y(:))) = 1;
+end
+
+
+function Wp = elastic_net_prox(A, alpha, lambda1, lambda2)
+    Wp = soft_threshold(A, alpha * lambda1) / (1 + alpha * lambda2);
+end
+
+
+function S = soft_threshold(A, tau)
+    S = sign(A) .* max(abs(A) - tau, 0);
+end
+
+
+function loss = data_loss_from_scores(Z, y)
+    Zmax = max(Z, [], 2);
+    logsumexp = log(sum(exp(bsxfun(@minus, Z, Zmax)), 2)) + Zmax;
+    n = numel(y);
+    loss = mean(logsumexp - Z(sub2ind(size(Z), (1:n)', y(:))));
+end
+
+
+function obj = objective_mlr(W, Z, y, lambda1, lambda2)
+    obj = data_loss_from_scores(Z, y) + lambda1 * sum(abs(W(:))) + 0.5 * lambda2 * sum(W(:).^2);
+end
+
+
+function hist = init_hist()
+    hist.obj = [];
+    hist.data_loss = [];
+    hist.nnz = [];
+    hist.time = [];
+    hist.iter = [];
+    hist.epoch_or_iter = [];
+end
+
+
+function hist = record_hist(hist, y, W, Z, lambda1, lambda2, epochOrIter, elapsed, iterCount)
+    hist.obj(end+1,1) = objective_mlr(W, Z, y, lambda1, lambda2);
+    hist.data_loss(end+1,1) = data_loss_from_scores(Z, y);
+    hist.nnz(end+1,1) = nnz(W);
+    hist.time(end+1,1) = elapsed;
+    hist.iter(end+1,1) = iterCount;
+    hist.epoch_or_iter(end+1,1) = epochOrIter;
+end
+
+
+function sn2 = spectral_norm_sq(X)
+    try
+        sn2 = normest(X)^2;
+    catch
+        sn2 = norm(X, 2)^2;
+    end
+end
+
+
+function maybe_print(opts, name, it, obj)
+    if opts.verbose
+        fprintf('%-16s step = %5d, obj = %.8e\n', name, it, obj);
+    end
+end
+
+
+function save_histories_and_plots(results, outDir)
+    methods = {'featurewise', 'classwise', 'whole_pg', 'block_metric_prox_svrg', 'whole_prox_svrg'};
+    labels = {'Feature-wise BPG', 'Class-wise BPG', 'Whole PG', ...
+              'Block-Metric Prox-SVRG', 'Whole Prox-SVRG'};
+
+    for m = 1:numel(methods)
+        method = methods{m};
+        H = results.(method).hist;
+        T = table(H.iter, H.epoch_or_iter, H.time, H.obj, H.data_loss, H.nnz, ...
+            'VariableNames', {'iteration', 'epoch_or_iter', 'time_sec', 'objective', 'data_loss', 'nnz'});
+        writetable(T, fullfile(outDir, [method, '_history.csv']));
+    end
+
+    fig1 = figure('Visible', 'off');
+    hold on;
+    for m = 1:numel(methods)
+        H = results.(methods{m}).hist;
+        plot(H.iter, H.obj, 'LineWidth', 1.8);
+    end
+    hold off;
+    grid on;
+    xlabel('Iteration count');
+    ylabel('Objective');
+    title('Objective vs iteration');
+    legend(labels, 'Location', 'best');
+    saveas(fig1, fullfile(outDir, 'objective_vs_iteration.png'));
+    saveas(fig1, fullfile(outDir, 'objective_vs_iteration.fig'));
+    legend(labels, 'Location', 'best');
+    saveas(fig1, fullfile(outDir, 'objective_vs_iteration.png'));
+    saveas(fig1, fullfile(outDir, 'objective_vs_iteration.fig'));
+
+    fig2 = figure('Visible', 'off');
+    hold on;
+    for m = 1:numel(methods)
+        H = results.(methods{m}).hist;
+        plot(H.time, H.obj, 'LineWidth', 1.8);
+    end
+    hold off;
+    grid on;
+    xlabel('Time, seconds');
+    ylabel('Objective');
+    title('Objective vs time');
+    legend(labels, 'Location', 'best');
+    saveas(fig2, fullfile(outDir, 'objective_vs_time.png'));
+    saveas(fig2, fullfile(outDir, 'objective_vs_time.fig'));
+    legend(labels, 'Location', 'best');
+    saveas(fig2, fullfile(outDir, 'objective_vs_time.png'));
+    saveas(fig2, fullfile(outDir, 'objective_vs_time.fig'));
+
+    close(fig1);
+    close(fig2);
+end

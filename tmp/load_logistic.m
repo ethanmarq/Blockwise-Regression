@@ -13,16 +13,16 @@
 
 % dataset    = 'news20';
 data_path  = sprintf('/scratch/marque6/libsvm_data/%s.mat', dataset);
-lambda1 = 1e-5; % L1 + L2 regularization weight
+lambda1 = 1e-2; % L1 + L2 regularization weight
 lambda2 = 1;
 max_n      = 500000; % subsample cap on #samples
 N          = 100; % iterations (safety cap)
 time_limit = 10; % time limit (s) per solver
 seed       = 0;
 x_mode     = 'time'; % 'iter' or 'time'
-standardize = true;
+standardize = false;
 add_bias = false;
-remove_zero = true;
+remove_zero = false;
 
 % === LOAD
 S = load(data_path);

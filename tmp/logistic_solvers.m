@@ -13,21 +13,21 @@ L_feat = sum(Z.^2, 1)/(2*n) + lambda2;
 L_spec = norm(Z, 2)^2/(4*n) + lambda2;
 % = Whole
 % Without STD
-% L_full = norm(Z, 2)^2/(2*n) + lambda2;
-% With STD
-L_full = 1/n + lambda2;
+L_full = norm(Z, 2)^2/(2*n) + lambda2;
 % = SAGA
 L_samp = max(sum(Z.^2, 2)/2) + lambda2;
 % = SVRG
-c = max(full(sum(Z.^2, 2)))/(2*n);
+c = max(full(sum(Z.^2, 2)))/(2);
 c = max(c, 1e-12);
 % = BM-SVRG
 % Incorrect because lam2 in proximal
 % Lj = full(max(Z.^2,[],1))'/2 + lam2;
 
 % Working
-Lj  = full(sum(Z.^2,1))'/(2*n);
+Lj = 0.5 * full(max(Z.^2, [], 1))';
+% Lj  = full(sum(Z.^2,1))'/(2);
 Lj  = max(Lj, 1e-12);
+
 
 % Working SVRG = BM-SVRG
 % Lj = (max(full(sum(Z.^2,2)))/2) * ones(m,1);
@@ -215,7 +215,7 @@ fprintf('  done in %.1fs at iter %d, F=%.4e, nnz(w)=%d/%d\n', ...
     T_saga(it), it, F_saga(it), nnz(w(1:k-1,:)), (k-1)*m);
 
 % === PLOT
-algs = {'BM-SVRG','C-CBPG','F-CBPG','Whole','SVRG','SAGA'};
+algs = {'Block-Metrix Prox-SVRG','Class-wise BPG','Feature-wise BPG','Whole PG','Whole Prox-SVRG','SAGA'};
 Tc = {T_bmsvrg(1:iter_bmsvrg), T_ccbpg(1:iter_ccbpg), T_fcbpg(1:iter_fcbpg), ...
       T_whole(1:iter_whole), T_svrg(1:iter_svrg), T_saga(1:iter_saga)};
 Fc = {F_bmsvrg(1:iter_bmsvrg), F_ccbpg(1:iter_ccbpg), F_fcbpg(1:iter_fcbpg), ...
@@ -235,7 +235,7 @@ Fstar = min(cellfun(@min, Fc));
 
 figure('Visible','off'); hold on; grid on; set(gca,'FontSize',16);
 for i = 1:numel(Fc)
-    plot(Xc{i}, Fc{i}, 'LineStyle', styles{i}, 'LineWidth', 2.5);
+    semilogy(Xc{i}, Fc{i}, 'LineStyle', styles{i}, 'LineWidth', 2.5);
 end
 ylim([Fstar - 5, max(cellfun(@max, Fc)) + 5]);
 xlabel(xlbl,'FontSize',20); ylabel('F','FontSize',20);
