@@ -5,9 +5,12 @@ module load matlab
 matlab -nodisplay
 run_mlr_comparison_all("/scratch/marque6/libsvm_data/letter.mat")
 run_mlr_comparison_all("/scratch/marque6/libsvm_data/usps.mat")
+run_mlr_comparison_all("/scratch/marque6/libsvm_data/poker.mat")
+run_mlr_comparison_all("/scratch/marque6/libsvm_data/shuttle.mat")
 run_mlr_comparison_all("/scratch/marque6/libsvm_data/news20.mat")
 run_mlr_comparison_all("/scratch/marque6/libsvm_data/rcv1_train.mat")
 run_mlr_comparison_all("/scratch/marque6/libsvm_data/mnist8m.mat")
+run_mlr_comparison_all("/scratch/marque6/libsvm_data/mnist.mat")
 
 # Sepearte Scripts
 salloc --mem=512gb --cpus-per-task=32 --time=08:00:00

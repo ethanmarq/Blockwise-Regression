@@ -35,12 +35,17 @@ function results = run_mlr_comparison_all(matFile, opts)
 %   opts.innerSVRG     default []       % if empty, uses 2*n
 %   opts.eta           default 1.0      % PG/BPG damping, step = eta/L
 %   opts.etaSVRG       default 0.1      % SVRG damping
+%   opts.timeLimit     default inf      % wall-clock seconds per solver
+%   opts.maxSamples    default inf      % randomly subsample to this many rows
 %   opts.standardize   default false
 %   opts.addIntercept  default false
 %   opts.seed          default 1
 %   opts.outDir        default 'mlr_results_all'
 %   opts.evalEvery     default 1
 %   opts.verbose       default true
+%
+% A solver stops at whichever limit it hits first: its epoch/iteration cap
+% (maxEpochs / maxIterWhole / maxEpochsSVRG) or opts.timeLimit seconds.
 %
 % Lipschitz constants for the averaged loss:
 %   whole PG:       L = ||X||_2^2 / (2n)
@@ -61,6 +66,8 @@ function results = run_mlr_comparison_all(matFile, opts)
         mkdir(opts.outDir);
     end
 
+    [~, datasetName] = fileparts(matFile);
+
     [X, y] = load_xy_from_mat(matFile);
     [X, y] = preprocess_xy(X, y, opts);
 
@@ -68,15 +75,19 @@ function results = run_mlr_comparison_all(matFile, opts)
     d = size(X,2);
     K = max(y);
 
-    fprintf('Loaded data: n = %d, d = %d, K = %d\n', n, d, K);
+    fprintf('Loaded data "%s": n = %d, d = %d, K = %d\n', datasetName, n, d, K);
     fprintf('Objective: average softmax loss + %.3e ||W||_1 + %.3e/2 ||W||_F^2\n', ...
         opts.lambda1, opts.lambda2);
+    if isfinite(opts.timeLimit)
+        fprintf('Per-solver time limit: %.1f s\n', opts.timeLimit);
+    end
 
     W0 = zeros(d, K);
 
     results = struct();
     results.opts = opts;
     results.matFile = matFile;
+    results.datasetName = datasetName;
 
     fprintf('\n[1/5] Running feature-wise cyclic BPG...\n');
     results.featurewise = featurewise_bpg_mlr(X, y, W0, opts);
@@ -95,7 +106,13 @@ function results = run_mlr_comparison_all(matFile, opts)
 
     save_histories_and_plots(results, opts.outDir);
 
-    save(fullfile(opts.outDir, 'results.mat'), 'results', '-v7.3');
+    resultsSlug = regexprep(datasetName, '[^A-Za-z0-9._-]', '_');
+    if isempty(resultsSlug)
+        resultsFile = 'results.mat';
+    else
+        resultsFile = sprintf('results_%s.mat', resultsSlug);
+    end
+    save(fullfile(opts.outDir, resultsFile), 'results', '-v7.3');
     fprintf('\nDone. Results saved to folder: %s\n', opts.outDir);
 end
 
@@ -104,11 +121,13 @@ function opts = fill_default_opts(opts)
     opts = set_default(opts, 'lambda1', 1e-2);
     opts = set_default(opts, 'lambda2', 1e-1);
     opts = set_default(opts, 'maxEpochs', 100);
-    opts = set_default(opts, 'maxIterWhole', 300);
-    opts = set_default(opts, 'maxEpochsSVRG', 10);
+    opts = set_default(opts, 'maxIterWhole', 100);
+    opts = set_default(opts, 'maxEpochsSVRG', 30);
     opts = set_default(opts, 'innerSVRG', []);
     opts = set_default(opts, 'eta', 1.0);
     opts = set_default(opts, 'etaSVRG', 0.1);
+    opts = set_default(opts, 'timeLimit', 20);
+    opts = set_default(opts, 'maxSamples', 100000);
     opts = set_default(opts, 'standardize', false);
     opts = set_default(opts, 'addIntercept', false);
     opts = set_default(opts, 'seed', 1);
@@ -208,6 +227,18 @@ function [X, y] = preprocess_xy(X, y, opts)
     [~, ~, y] = unique(y);
     y = double(y(:));
 
+    % Optionally subsample rows (e.g. mnist8m: keep a few hundred thousand).
+    n = size(X,1);
+    if isfinite(opts.maxSamples) && n > opts.maxSamples
+        N = round(opts.maxSamples);
+        sel = randperm(n, N);
+        X = X(sel, :);
+        y = y(sel);
+        [~, ~, y] = unique(y);   % relabel in case a class disappeared
+        y = double(y(:));
+        fprintf('Subsampled %d -> %d rows.\n', n, N);
+    end
+
     if opts.standardize
         if issparse(X)
             colScale = sqrt(sum(X.^2, 1) / max(1, size(X,1)));
@@ -234,6 +265,7 @@ function out = featurewise_bpg_mlr(X, y, W, opts)
     K = size(W,2);
     lambda1 = opts.lambda1;
     lambda2 = opts.lambda2;
+    timeLimit = opts.timeLimit;
 
     Y = one_hot_labels(y, K);
     Z = X * W;
@@ -246,6 +278,7 @@ function out = featurewise_bpg_mlr(X, y, W, opts)
     hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
 
     iterCount = 0;
+    stop = false;
     for epoch = 1:opts.maxEpochs
         for j = 1:d
             P = softmax_rows(Z);
@@ -259,12 +292,15 @@ function out = featurewise_bpg_mlr(X, y, W, opts)
             W(j,:) = newRow;
             Z = Z + X(:,j) * delta;
             iterCount = iterCount + 1;
+
+            if mod(j, 256) == 0 && toc(t0) >= timeLimit, stop = true; break; end
         end
 
-        if mod(epoch, opts.evalEvery) == 0 || epoch == opts.maxEpochs
+        if stop || mod(epoch, opts.evalEvery) == 0 || epoch == opts.maxEpochs
             hist = record_hist(hist, y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
             maybe_print(opts, 'featurewise', epoch, hist.obj(end));
         end
+        if stop || toc(t0) >= timeLimit, break; end
     end
 
     out.W = W;
@@ -278,6 +314,7 @@ function out = classwise_bpg_mlr(X, y, W, opts)
     K = size(W,2);
     lambda1 = opts.lambda1;
     lambda2 = opts.lambda2;
+    timeLimit = opts.timeLimit;
 
     Y = one_hot_labels(y, K);
     Z = X * W;
@@ -291,6 +328,7 @@ function out = classwise_bpg_mlr(X, y, W, opts)
     hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
 
     iterCount = 0;
+    stop = false;
     for epoch = 1:opts.maxEpochs
         for k = 1:K
             P = softmax_rows(Z);
@@ -303,12 +341,15 @@ function out = classwise_bpg_mlr(X, y, W, opts)
             W(:,k) = newCol;
             Z(:,k) = Z(:,k) + X * delta;
             iterCount = iterCount + 1;
+
+            if toc(t0) >= timeLimit, stop = true; break; end
         end
 
-        if mod(epoch, opts.evalEvery) == 0 || epoch == opts.maxEpochs
+        if stop || mod(epoch, opts.evalEvery) == 0 || epoch == opts.maxEpochs
             hist = record_hist(hist, y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
             maybe_print(opts, 'classwise', epoch, hist.obj(end));
         end
+        if stop || toc(t0) >= timeLimit, break; end
     end
 
     out.W = W;
@@ -322,6 +363,7 @@ function out = whole_prox_gradient_mlr(X, y, W, opts)
     n = size(X,1);
     lambda1 = opts.lambda1;
     lambda2 = opts.lambda2;
+    timeLimit = opts.timeLimit;
 
     Z = X * W;
     Y = one_hot_labels(y, size(W,2));
@@ -341,10 +383,12 @@ function out = whole_prox_gradient_mlr(X, y, W, opts)
         W = elastic_net_prox(W - alpha * G, alpha, lambda1, lambda2);
         Z = X * W;
 
-        if mod(it, opts.evalEvery) == 0 || it == opts.maxIterWhole
+        reachedTime = toc(t0) >= timeLimit;
+        if reachedTime || mod(it, opts.evalEvery) == 0 || it == opts.maxIterWhole
             hist = record_hist(hist, y, W, Z, lambda1, lambda2, it, toc(t0), it);
             maybe_print(opts, 'whole-pg', it, hist.obj(end));
         end
+        if reachedTime, break; end
     end
 
     out.W = W;
@@ -353,28 +397,17 @@ function out = whole_prox_gradient_mlr(X, y, W, opts)
     out.alpha = alpha;
 end
 
-
 function out = block_metric_prox_svrg_mlr(X, y, W, opts)
     n = size(X,1);
     d = size(X,2);
     K = size(W,2);
     lambda1 = opts.lambda1;
     lambda2 = opts.lambda2;
-
-    if isempty(opts.innerSVRG)
-        m = 2*n;
-    else
-        m = opts.innerSVRG;
-    end
+    timeLimit = opts.timeLimit;
 
     % Feature-row metric for individual losses.
     H = 0.5 * full(max(X.^2, [], 1))';
-    % rl1 = full(sum(abs(X), 2)); % n x 1, ||x_i||_1
-    % H   = 0.5 * full(max(abs(X) .* rl1, [], 1))'; % d x 1, valid per-feature metric
-    % H   = max(H, 1e-14);
-    % Lj  = full(sum(Z.^2,1))'/(2);
-    % H = 0.5 * max(full(sum(X.^2,2))) * ones(d,1);
-    % H = full(sum(X.^2,1))'/(2);
+    % H = H.*sqrt(d);
     H = max(H, 1e-14);
 
     hist = init_hist();
@@ -382,15 +415,14 @@ function out = block_metric_prox_svrg_mlr(X, y, W, opts)
     t0 = tic;
     hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
 
-    % beta    = 2*eta/(1-eta);
-    % mu_H    = lam2/max(Lj);
-    % m_inner = floor((1/(eta*mu_H)+beta)/(1-2*beta)) + 1;
-
     beta = (2*opts.etaSVRG)/(1-opts.etaSVRG);
     mu_h = opts.lambda2 / max(H);
     m = floor((1/(opts.etaSVRG*mu_h)+beta)/(1-2*beta)) + 1;
+    % m = floor(m*max(H)*beta / (d));
+    % m = floor(m/(0.5*sqrt(d)));
 
     iterCount = 0;
+    stop = false;
     for epoch = 1:opts.maxEpochsSVRG
         Wsnap = W;
         Zsnap = X * Wsnap;
@@ -408,9 +440,7 @@ function out = block_metric_prox_svrg_mlr(X, y, W, opts)
             yi = zeros(1, K);
             yi(y(i)) = 1;
 
-            grad_i_cur = xi' * (pi - yi);
-            grad_i_snap = xi' * (pis - yi);
-            v = grad_i_cur - grad_i_snap + fullGradSnap;
+            v = xi'*pi - xi'*pis + fullGradSnap;
 
             % Full block-metric proximal update, decomposed across feature rows.
             % for j = 1:d
@@ -424,11 +454,14 @@ function out = block_metric_prox_svrg_mlr(X, y, W, opts)
             W = sign(A) .* max(abs(A) - alpha*lambda1, 0) ./ (1 + alpha*lambda2);
 
             iterCount = iterCount + 1;
+
+            if mod(t, 1000) == 0 && toc(t0) >= timeLimit, stop = true; break; end
         end
 
         Z = X * W;
         hist = record_hist(hist, y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
         maybe_print(opts, 'bm-prox-svrg', epoch, hist.obj(end));
+        if stop || toc(t0) >= timeLimit, break; end
     end
 
     out.W = W;
@@ -443,6 +476,7 @@ function out = whole_prox_svrg_mlr(X, y, W, opts)
     K = size(W,2);
     lambda1 = opts.lambda1;
     lambda2 = opts.lambda2;
+    timeLimit = opts.timeLimit;
 
     if isempty(opts.innerSVRG)
         m = 2*n;
@@ -461,6 +495,7 @@ function out = whole_prox_svrg_mlr(X, y, W, opts)
     beta = (2*opts.etaSVRG)/(1-opts.etaSVRG);
     mu_h = opts.lambda2 / max(L);
     m = floor((1/(opts.etaSVRG*mu_h)+beta)/(1-2*beta)) + 1;
+    % m = floor(m / sqrt(n));
 
 
     hist = init_hist();
@@ -469,6 +504,7 @@ function out = whole_prox_svrg_mlr(X, y, W, opts)
     hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
 
     iterCount = 0;
+    stop = false;
     for epoch = 1:opts.maxEpochsSVRG
         Wsnap = W;
         Zsnap = X * Wsnap;
@@ -494,11 +530,14 @@ function out = whole_prox_svrg_mlr(X, y, W, opts)
             % Whole-matrix Prox-SVRG update.
             W = elastic_net_prox(W - alpha * v, alpha, lambda1, lambda2);
             iterCount = iterCount + 1;
+
+            if mod(t, 1000) == 0 && toc(t0) >= timeLimit, stop = true; break; end
         end
 
         Z = X * W;
         hist = record_hist(hist, y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
         maybe_print(opts, 'whole-prox-svrg', epoch, hist.obj(end));
+        if stop || toc(t0) >= timeLimit, break; end
     end
 
     out.W = W;
@@ -606,7 +645,15 @@ function save_histories_and_plots(results, outDir)
     grid on;
     xlabel('Iteration count');
     ylabel('Objective');
-    title('Objective vs iteration');
+
+    dsName = results.datasetName;
+    dsTag  = strrep(dsName, '_', '\_');
+
+    if isempty(dsTag)
+        title('Objective vs iteration');
+    else
+        title(sprintf('%s: objective vs iteration', dsTag));
+    end
     legend(labels, 'Location', 'best');
     saveas(fig1, fullfile(outDir, 'objective_vs_iteration.png'));
     saveas(fig1, fullfile(outDir, 'objective_vs_iteration.fig'));
@@ -624,7 +671,11 @@ function save_histories_and_plots(results, outDir)
     grid on;
     xlabel('Time, seconds');
     ylabel('Objective');
-    title('Objective vs time');
+    if isempty(dsTag)
+        title('Objective vs time');
+    else
+        title(sprintf('%s: objective vs time', dsTag));
+    end
     legend(labels, 'Location', 'best');
     saveas(fig2, fullfile(outDir, 'objective_vs_time.png'));
     saveas(fig2, fullfile(outDir, 'objective_vs_time.fig'));
