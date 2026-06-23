@@ -294,8 +294,8 @@ function out = featurewise_bpg_mlr(X, y, W, opts)
             else
                 Zi = Z(idx,:);
                 Pi = softmax_rows(Zi); % softmax on support only
-                gj = (xv' * (Pi - Y(idx,:))) / n;
-                % gj = (xv' * (Pi - Y(idx,:))) / n + lambda2*oldRow;
+                % gj = (xv' * (Pi - Y(idx,:))) / n;
+                gj = (xv' * (Pi - Y(idx,:))) / n + lambda2*oldRow;
 
             end
             % newRow = elastic_net_prox(oldRow - alpha * gj, alpha, lambda1, lambda2);
