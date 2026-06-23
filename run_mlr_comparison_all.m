@@ -128,7 +128,7 @@ function opts = fill_default_opts(opts)
     opts = set_default(opts, 'etaSVRG', 0.1);
     opts = set_default(opts, 'timeLimit', 20);
     opts = set_default(opts, 'maxSamples', 100000);
-    opts = set_default(opts, 'standardize', true);
+    opts = set_default(opts, 'standardize', false);
     opts = set_default(opts, 'addIntercept', false);
     opts = set_default(opts, 'seed', 1);
     opts = set_default(opts, 'outDir', 'mlr_results_all');
@@ -273,7 +273,8 @@ function out = featurewise_bpg_mlr(X, y, W, opts)
 
     Y = one_hot_labels(y, K);
     Z = X * W;
-    L = full(sum(X.^2, 1))' / (2*n);
+    % L = full(sum(X.^2, 1))' / (2*n);
+    L = full(sum(X.^2, 1))' / (2*n) + lambda2;
     L = max(L, 1e-14);
 
     hist = init_hist();
@@ -288,13 +289,18 @@ function out = featurewise_bpg_mlr(X, y, W, opts)
             oldRow = W(j,:);
             [idx, ~, xv] = find(X(:,j));
             if isempty(idx)
-                gj = zeros(1, K);
+                % gj = zeros(1, K);
+                gj = lambda2 * oldRow;
             else
                 Zi = Z(idx,:);
                 Pi = softmax_rows(Zi); % softmax on support only
                 gj = (xv' * (Pi - Y(idx,:))) / n;
+                % gj = (xv' * (Pi - Y(idx,:))) / n + lambda2*oldRow;
+
             end
-            newRow = elastic_net_prox(oldRow - alpha * gj, alpha, lambda1, lambda2);
+            % newRow = elastic_net_prox(oldRow - alpha * gj, alpha, lambda1, lambda2);
+            t = oldRow - gj./L(j);
+            newRow = sign(t).*max(abs(t)-alpha*lambda1, 0);
             delta  = newRow - oldRow;
             W(j,:) = newRow;
             if ~isempty(idx) && any(delta)
