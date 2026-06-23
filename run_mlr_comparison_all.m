@@ -120,15 +120,15 @@ end
 function opts = fill_default_opts(opts)
     opts = set_default(opts, 'lambda1', 1e-2);
     opts = set_default(opts, 'lambda2', 1e-1);
-    opts = set_default(opts, 'maxEpochs', 100);
-    opts = set_default(opts, 'maxIterWhole', 100);
+    opts = set_default(opts, 'maxEpochs', 500);
+    opts = set_default(opts, 'maxIterWhole', 500);
     opts = set_default(opts, 'maxEpochsSVRG', 30);
     opts = set_default(opts, 'innerSVRG', []);
     opts = set_default(opts, 'eta', 1.0);
     opts = set_default(opts, 'etaSVRG', 0.1);
     opts = set_default(opts, 'timeLimit', 20);
     opts = set_default(opts, 'maxSamples', 100000);
-    opts = set_default(opts, 'standardize', false);
+    opts = set_default(opts, 'standardize', true);
     opts = set_default(opts, 'addIntercept', false);
     opts = set_default(opts, 'seed', 1);
     opts = set_default(opts, 'outDir', 'mlr_results_all');
@@ -258,44 +258,51 @@ function [X, y] = preprocess_xy(X, y, opts)
     end
 end
 
-
 function out = featurewise_bpg_mlr(X, y, W, opts)
+% Softmax/gradient computed on only nonzero rows of each column.
+% Per-epoch cost drops from O(d*n*K) to O(K*nnz(X))
+
+    X = sparse(X);
     n = size(X,1);
     d = size(X,2);
     K = size(W,2);
     lambda1 = opts.lambda1;
     lambda2 = opts.lambda2;
     timeLimit = opts.timeLimit;
+    eta = opts.eta;
 
     Y = one_hot_labels(y, K);
     Z = X * W;
-
     L = full(sum(X.^2, 1))' / (2*n);
     L = max(L, 1e-14);
 
     hist = init_hist();
     t0 = tic;
     hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
-
     iterCount = 0;
     stop = false;
+
     for epoch = 1:opts.maxEpochs
         for j = 1:d
-            P = softmax_rows(Z);
-            gj = X(:,j)' * (P - Y) / n;
-
-            alpha = opts.eta / L(j);
+            alpha  = eta / L(j);
             oldRow = W(j,:);
+            [idx, ~, xv] = find(X(:,j));
+            if isempty(idx)
+                gj = zeros(1, K);
+            else
+                Zi = Z(idx,:);
+                Pi = softmax_rows(Zi); % softmax on support only
+                gj = (xv' * (Pi - Y(idx,:))) / n;
+            end
             newRow = elastic_net_prox(oldRow - alpha * gj, alpha, lambda1, lambda2);
-            delta = newRow - oldRow;
-
+            delta  = newRow - oldRow;
             W(j,:) = newRow;
-            Z = Z + X(:,j) * delta;
+            if ~isempty(idx) && any(delta)
+                Z(idx,:) = Zi + xv * delta;
+            end
             iterCount = iterCount + 1;
-
             if mod(j, 256) == 0 && toc(t0) >= timeLimit, stop = true; break; end
         end
-
         if stop || mod(epoch, opts.evalEvery) == 0 || epoch == opts.maxEpochs
             hist = record_hist(hist, y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
             maybe_print(opts, 'featurewise', epoch, hist.obj(end));
@@ -307,6 +314,56 @@ function out = featurewise_bpg_mlr(X, y, W, opts)
     out.hist = hist;
     out.L = L;
 end
+
+
+% function out = featurewise_bpg_mlr(X, y, W, opts)
+%     n = size(X,1);
+%     d = size(X,2);
+%     K = size(W,2);
+%     lambda1 = opts.lambda1;
+%     lambda2 = opts.lambda2;
+%     timeLimit = opts.timeLimit;
+
+%     Y = one_hot_labels(y, K);
+%     Z = X * W;
+
+%     L = full(sum(X.^2, 1))' / (2*n);
+%     L = max(L, 1e-14);
+
+%     hist = init_hist();
+%     t0 = tic;
+%     hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
+
+%     iterCount = 0;
+%     stop = false;
+%     for epoch = 1:opts.maxEpochs
+%         for j = 1:d
+%             P = softmax_rows(Z);
+%             gj = X(:,j)' * (P - Y) / n;
+
+%             alpha = opts.eta / L(j);
+%             oldRow = W(j,:);
+%             newRow = elastic_net_prox(oldRow - alpha * gj, alpha, lambda1, lambda2);
+%             delta = newRow - oldRow;
+
+%             W(j,:) = newRow;
+%             Z = Z + X(:,j) * delta;
+%             iterCount = iterCount + 1;
+
+%             if mod(j, 256) == 0 && toc(t0) >= timeLimit, stop = true; break; end
+%         end
+
+%         if stop || mod(epoch, opts.evalEvery) == 0 || epoch == opts.maxEpochs
+%             hist = record_hist(hist, y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
+%             maybe_print(opts, 'featurewise', epoch, hist.obj(end));
+%         end
+%         if stop || toc(t0) >= timeLimit, break; end
+%     end
+
+%     out.W = W;
+%     out.hist = hist;
+%     out.L = L;
+% end
 
 
 function out = classwise_bpg_mlr(X, y, W, opts)
@@ -406,9 +463,15 @@ function out = block_metric_prox_svrg_mlr(X, y, W, opts)
     timeLimit = opts.timeLimit;
 
     % Feature-row metric for individual losses.
-    H = 0.5 * full(max(X.^2, [], 1))';
+    % H = 0.5 * full(max(X.^2, [], 1))';
     % H = H.*sqrt(d);
+    % H= full(sum(X.^2, 1))' / (2*sqrt(n));
+    % H= max(H, 1e-14);
+    rowL1 = full(sum(abs(X), 2));  % n-by-1
+    H = 0.5 * full(max(abs(X) .* rowL1, [], 1))';
     H = max(H, 1e-14);
+    alpha = opts.etaSVRG ./ H(:);
+
 
     hist = init_hist();
     Z = X * W;
@@ -420,6 +483,12 @@ function out = block_metric_prox_svrg_mlr(X, y, W, opts)
     m = floor((1/(opts.etaSVRG*mu_h)+beta)/(1-2*beta)) + 1;
     % m = floor(m*max(H)*beta / (d));
     % m = floor(m/(0.5*sqrt(d)));
+    % if floor(m/(sqrt(n)*d)) ~= 0
+    %     m = floor(m/(sqrt(n)*d));
+    % else
+    %     m = floor(m/sqrt(n));
+    % end
+
 
     iterCount = 0;
     stop = false;
@@ -447,8 +516,6 @@ function out = block_metric_prox_svrg_mlr(X, y, W, opts)
             %     alpha_j = opts.etaSVRG / H(j);
             %     W(j,:) = elastic_net_prox(W(j,:) - alpha_j * v(j,:), alpha_j, lambda1, lambda2);
             % end
-            % d x 1, per-row step sizes
-            alpha = opts.etaSVRG ./ H(:);
             % d x K, broadcast over rows
             A = W - alpha .* v;
             W = sign(A) .* max(abs(A) - alpha*lambda1, 0) ./ (1 + alpha*lambda2);
