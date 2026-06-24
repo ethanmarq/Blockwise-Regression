@@ -126,9 +126,9 @@ function opts = fill_default_opts(opts)
     opts = set_default(opts, 'innerSVRG', []);
     opts = set_default(opts, 'eta', 1.0);
     opts = set_default(opts, 'etaSVRG', 0.1);
-    opts = set_default(opts, 'timeLimit', 20);
+    opts = set_default(opts, 'timeLimit', 60);
     opts = set_default(opts, 'maxSamples', 100000);
-    opts = set_default(opts, 'standardize', false);
+    opts = set_default(opts, 'standardize', true);
     opts = set_default(opts, 'addIntercept', false);
     opts = set_default(opts, 'seed', 1);
     opts = set_default(opts, 'outDir', 'mlr_results_all');
@@ -284,10 +284,17 @@ function out = featurewise_bpg_mlr(X, y, W, opts)
     stop = false;
 
     for epoch = 1:opts.maxEpochs
+        colIdx = cell(d,1);
+        colVal = cell(d,1);
         for j = 1:d
-            alpha  = eta / L(j);
+            [colIdx{j}, ~, colVal{j}] = find(X(:,j));
+        end
+        alphaVec = eta ./ L;
+        for j = 1:d
+            alpha  = alphaVec(j);
             oldRow = W(j,:);
-            [idx, ~, xv] = find(X(:,j));
+            idx = colIdx{j};
+            xv  = colVal{j};
             if isempty(idx)
                 % gj = zeros(1, K);
                 gj = lambda2 * oldRow;
@@ -299,7 +306,7 @@ function out = featurewise_bpg_mlr(X, y, W, opts)
 
             end
             % newRow = elastic_net_prox(oldRow - alpha * gj, alpha, lambda1, lambda2);
-            t = oldRow - gj./L(j);
+            t = oldRow - alpha*gj;
             newRow = sign(t).*max(abs(t)-alpha*lambda1, 0);
             delta  = newRow - oldRow;
             W(j,:) = newRow;

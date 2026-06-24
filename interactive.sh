@@ -1,17 +1,19 @@
 #!/usr/bin/env sh
 # Single Script
-salloc --mem=8gb --cpus-per-task=16 --time=08:00:00
+salloc --mem=128gb --cpus-per-task=32 --time=08:00:00
 module load matlab
 matlab -nodisplay
+run_mlr_comparison_all("/scratch/marque6/libsvm_data/ledgar.mat", struct('outDir','ledgar'))
+run_mlr_comparison_all("/scratch/marque6/libsvm_data/dna.mat", struct('outDir','dan'))
+run_mlr_comparison_all("/scratch/marque6/libsvm_data/mnist8m.mat", struct('outDir', 'mnist'))
+run_mlr_comparison_all("/scratch/marque6/libsvm_data/aloi.mat", struct('outDir', 'aloi'))
+run_mlr_comparison_all("/scratch/marque6/libsvm_data/usps.mat", struct('outDir', 'usps'))
+run_mlr_comparison_all("/scratch/marque6/libsvm_data/news20.mat", struct('outDir','news20'))
 run_mlr_comparison_all("/scratch/marque6/libsvm_data/mnist.mat")
 run_mlr_comparison_all("/scratch/marque6/libsvm_data/letter.mat")
-run_mlr_comparison_all("/scratch/marque6/libsvm_data/usps.mat")
 run_mlr_comparison_all("/scratch/marque6/libsvm_data/poker.mat")
 run_mlr_comparison_all("/scratch/marque6/libsvm_data/shuttle.mat")
-run_mlr_comparison_all("/scratch/marque6/libsvm_data/news20.mat")
 run_mlr_comparison_all("/scratch/marque6/libsvm_data/rcv1_train.mat")
-run_mlr_comparison_all("/scratch/marque6/libsvm_data/mnist8m.mat")
-run_mlr_comparison_all("/scratch/marque6/libsvm_data/mnist.mat")
 
 # Sepearte Scripts
 salloc --mem=512gb --cpus-per-task=32 --time=08:00:00
