@@ -259,6 +259,130 @@ function [X, y] = preprocess_xy(X, y, opts)
 end
 
 function out = featurewise_bpg_mlr(X, y, W, opts)
+%FEATUREWISE_BPG_MLR  Chunked + screened feature-wise block prox-grad for MLR.
+%   Drop-in replacement for the cyclic featurewise_bpg_mlr in
+%   run_mlr_comparison_all.m. Same signature, same output struct, same
+%   helpers (softmax_rows, one_hot_labels, init_hist, record_hist).
+%
+%   Idea: Gauss-Seidel ACROSS feature chunks (keeps the per-feature
+%   preconditioning that wins on news20), Jacobi WITHIN a chunk so each
+%   chunk's gradient + score update are single matmuls (the BLAS-3
+%   efficiency Whole PG enjoys, which is what large K rewards). Active-set
+%   screening shrinks the effective d, independent of K.
+%
+%   Layout (matches the file): X n-by-d, W d-by-K (features x classes),
+%   full K-class softmax over columns, L_j = ||X(:,j)||^2/(2n)+lambda2.
+%
+%   Extra opts (all optional, sensible defaults):
+%     opts.chunkSize   features per chunk          (default 1024)
+%     opts.tau         within-chunk damping >= 1   (default 1.0)
+%     opts.screenEvery resync + rescreen period    (default 5; inf = off)
+%     opts.screenSlack admit if viol > lam1*slack  (default 1.0)
+%     opts.shuffle     permute cols before chunking (default true)
+
+    X = sparse(X);
+    n = size(X,1);
+    d = size(X,2);
+    K = size(W,2);
+
+    lambda1   = opts.lambda1;
+    lambda2   = opts.lambda2;
+    timeLimit = opts.timeLimit;
+    eta       = opts.eta;
+
+    chunkSize   = getf(opts,'chunkSize', 32);
+    tau         = getf(opts,'tau',1.0);
+    screenEvery = getf(opts,'screenEvery',5);
+    screenSlack = getf(opts,'screenSlack',1.0);
+    shuffle     = getf(opts,'shuffle',true);
+
+    Y = one_hot_labels(y, K); % n x K
+    Z = X * W; % n x K
+
+    L = full(sum(X.^2, 1)).' / (2*n) + lambda2; % d x 1
+    L = max(L, 1e-14);
+    alphaVec = eta ./ (tau .* L); % d x 1
+
+    hist = init_hist();
+    t0 = tic;
+    hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
+    iterCount = 0;
+
+    active  = true(d,1);
+    chunks  = {}; urows = {};
+    rebuild = true;
+
+    for epoch = 1:opts.maxEpochs
+        % periodic exact resync of Z + KKT screening of the working set
+        if isfinite(screenEvery) && mod(epoch-1, screenEvery) == 0
+            Z = X * W; % kill incremental drift
+            P = softmax_rows(Z); % n x K
+            Gfull = X.' * (P - Y) / n + lambda2 * W; % d x K
+            viol  = max(abs(Gfull), [], 2); % d x 1  KKT slack
+            active = any(W ~= 0, 2) | (viol > lambda1 * screenSlack);
+            rebuild = true;
+        end
+
+        % rebuild chunk index sets over active features
+        if rebuild
+            ac = find(active);
+            if shuffle, ac = ac(randperm(numel(ac))); end
+            nC = max(1, ceil(numel(ac)/chunkSize));
+            chunks = cell(1,nC); urows = cell(1,nC);
+            for c = 1:nC
+                cols = ac((c-1)*chunkSize+1 : min(c*chunkSize, numel(ac)));
+                chunks{c} = cols;
+                urows{c}  = find(any(X(:,cols) ~= 0, 2)); % union support
+            end
+            rebuild = false;
+        end
+
+        % Gauss-Sidel sweep over chunks
+        stop = false;
+        for c = 1:numel(chunks)
+            cols = chunks{c};  r = urows{c};
+            if isempty(cols) || isempty(r), continue; end
+
+            Zr = Z(r,:); % |r| x K
+            Pr = softmax_rows(Zr); % |r| x K
+            R  = Pr - Y(r,:); % residual
+            Xc = X(r, cols); % |r| x |cols| sparse
+
+            G    = (Xc.' * R) / n + lambda2 * W(cols,:); % |cols| x K, ONE matmul
+            a    = alphaVec(cols); % |cols| x 1
+            Wold = W(cols,:);
+            Tt   = Wold - a .* G; % per-feature step
+            Wnew = sign(Tt) .* max(abs(Tt) - a .* lambda1, 0); % soft-threshold
+
+            dW       = Wnew - Wold;
+            W(cols,:) = Wnew;
+            Z(r,:)    = Zr + Xc * dW; % score update, ONE matmul
+
+            iterCount = iterCount + 1;
+            if toc(t0) >= timeLimit, stop = true; break; end
+        end
+
+        hist = record_hist(hist, y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
+        if isfield(opts,'verbose') && opts.verbose
+            fprintf('%-16s epoch = %4d, obj = %.8e, active = %d\n', ...
+                    'feat-chunk', epoch, hist.obj(end), nnz(active));
+        end
+        if stop || toc(t0) >= timeLimit, break; end
+    end
+
+    out.W     = W;
+    out.hist  = hist;
+    out.L     = L;
+    out.alpha = alphaVec;
+    out.info  = struct('active_final', nnz(active), 'nnz_W', nnz(W), ...
+                       'epochs', epoch, 'chunkSize', chunkSize, 'tau', tau);
+end
+
+function v = getf(s, f, dflt)
+    if isstruct(s) && isfield(s, f) && ~isempty(s.(f)), v = s.(f); else, v = dflt; end
+end
+
+function out = featurewise_bpg_mlr_old(X, y, W, opts)
 % Softmax/gradient computed on only nonzero rows of each column.
 % Per-epoch cost drops from O(d*n*K) to O(K*nnz(X))
 
@@ -276,6 +400,7 @@ function out = featurewise_bpg_mlr(X, y, W, opts)
     % L = full(sum(X.^2, 1))' / (2*n);
     L = full(sum(X.^2, 1))' / (2*n) + lambda2;
     L = max(L, 1e-14);
+    tau = 2;
 
     hist = init_hist();
     t0 = tic;
