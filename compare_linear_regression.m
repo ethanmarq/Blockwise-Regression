@@ -71,7 +71,7 @@ function opts = fill_default_opts(opts)
     opts = set_default(opts, 'maxEpochs', 500);
     opts = set_default(opts, 'maxIterWhole', 500);
     opts = set_default(opts, 'maxEpochsSVRG', 100);
-    opts = set_default(opts, 'innerSVRG', []);
+    opts = set_default(opts, 'innerSVRG', []); %[]
     opts = set_default(opts, 'eta', 1.0);
     opts = set_default(opts, 'etaSVRG', 0.1);
     opts = set_default(opts, 'timeLimit', 60);
@@ -181,26 +181,10 @@ function [X, Y] = preprocess_xy(X, Y, opts)
 end
 
 
+% Gauss-Sidel across feature chunks
+% Jacobi within chunk
+% Active-set screening
 function out = featurewise_bpg_mlr(X, Y, W, opts)
-%FEATUREWISE_BPG_MLR  Chunked + screened feature-wise block prox-grad (MRLR).
-%
-%   Gauss-Seidel ACROSS feature chunks (keeps the per-feature preconditioning
-%   that wins on sparse high-d data), Jacobi WITHIN a chunk so each chunk's
-%   gradient and score update are single matmuls (BLAS-3 efficiency that large
-%   K rewards). Active-set screening shrinks the effective d, independent of K.
-%
-%   Summed-form least-squares layout: A = X (n x d), W (d x K), residual
-%   R = A*W - Y, feature-block constants L_j = ||A(:,j)||^2 + lambda2 (the
-%   ridge is folded into the smooth part, so the within-chunk prox is a plain
-%   soft-threshold).
-%
-%   Extra opts (all optional, sensible defaults):
-%     opts.chunkSize   features per chunk          (default 32)
-%     opts.tau         within-chunk damping >= 1   (default 1.0)
-%     opts.screenEvery resync + rescreen period    (default 5; inf = off)
-%     opts.screenSlack admit if viol > lam1*slack  (default 1.0)
-%     opts.shuffle     permute cols before chunking (default true)
-
     X = sparse(X);
     n = size(X,1);
     d = size(X,2);
@@ -210,11 +194,15 @@ function out = featurewise_bpg_mlr(X, Y, W, opts)
     timeLimit = opts.timeLimit;
     eta       = opts.eta;
 
-    chunkSize   = getf(opts, 'chunkSize', 1);
-    tau         = getf(opts, 'tau', 1.0);
-    screenEvery = getf(opts, 'screenEvery', 5);
-    screenSlack = getf(opts, 'screenSlack', 1.0);
-    shuffle     = getf(opts, 'shuffle', true);
+    density   = nnz(X) / max(1, n*d);
+    csDefault = min(d, min(256, max(1, round(1/max(density, eps)))));
+    fprintf('Chunksize: %.2e\n', csDefault);
+
+    chunkSize   = getf(opts,'chunkSize', csDefault); % features per chunk
+    tau         = getf(opts, 'tau', 1.0); % within-chunk damping >=1
+    screenEvery = getf(opts, 'screenEvery', 5); % resync + rescreen period
+    screenSlack = getf(opts, 'screenSlack', 1.0); % admit if viol > lam1*slack
+    shuffle     = getf(opts, 'shuffle', true); % permute cols before chunking
 
     Z = X * W;   % n x K
 
@@ -447,14 +435,22 @@ end
 
 function out = block_metric_prox_svrg_mlr(X, Y, W, opts)
     n = size(X,1);
+    d = size(X,2);
     lambda1 = opts.lambda1;
     lambda2 = opts.lambda2;
     timeLimit = opts.timeLimit;
     etaSVRG = opts.etaSVRG;
 
-    if isempty(opts.innerSVRG), m = 2*n; else, m = opts.innerSVRG; end
+    if isempty(opts.innerSVRG), m = d; else, m = opts.innerSVRG; end
 
-    H = n * full(max(X.^2, [], 1))'; % d-by-1
+    % H = n * full(max(X.^2, [], 1))'; % d-by-1
+    % rowL1 = full(sum(abs(X), 2));                % ||x_i||_1
+    % H = n * full(max(abs(X) .* rowL1, [], 1))';
+    % H = max(H, 1e-14);
+
+    colMaxSq = full(max(X.^2, [], 1)).';
+    C        = full(max( (X.^2) * (1 ./ colMaxSq) ));
+    H        = (n * C) * colMaxSq;
     H = max(H, 1e-14);
     alpha = etaSVRG ./ H; % d-by-1, broadcasts across the K columns
 
@@ -503,7 +499,7 @@ function out = whole_prox_svrg_mlr(X, Y, W, opts)
     timeLimit = opts.timeLimit;
     etaSVRG = opts.etaSVRG;
 
-    if isempty(opts.innerSVRG), m = 2*n; else, m = opts.innerSVRG; end
+    if isempty(opts.innerSVRG), m = n; else, m = opts.innerSVRG; end
 
     L = n * max(full(sum(X.^2, 2)));
     L = max(L, 1e-14);

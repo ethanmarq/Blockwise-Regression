@@ -26,3 +26,5 @@ matlab -nodisplay
 compare_linear_regression("/scratch/marque6/libsvm_data/cadata.mat", struct('outDir', 'mrlr-cadata'))
 compare_linear_regression("/scratch/marque6/libsvm_data/triazines.mat", struct('outDir', 'mrlr-triazines'))
 compare_linear_regression("/scratch/marque6/libsvm_data/pyrim.mat", struct('outDir', 'mrlr-pyrim'))
+compare_linear_regression("/scratch/marque6/libsvm_data/log1p_E2006.mat", struct('outDir', 'mrlr-log1p'))
+compare_linear_regression("/scratch/marque6/libsvm_data/yearPredictionMSD.mat", struct('outDir', 'mrlr-yearPrediction'))

@@ -134,6 +134,7 @@ function opts = fill_default_opts(opts)
     opts = set_default(opts, 'outDir', 'mlr_results_all');
     opts = set_default(opts, 'evalEvery', 1);
     opts = set_default(opts, 'verbose', true);
+    opts = set_default(opts, 'batchSize', 1024);
 end
 
 
@@ -258,28 +259,12 @@ function [X, y] = preprocess_xy(X, y, opts)
     end
 end
 
-function out = featurewise_bpg_mlr(X, y, W, opts)
-%FEATUREWISE_BPG_MLR  Chunked + screened feature-wise block prox-grad for MLR.
-%   Drop-in replacement for the cyclic featurewise_bpg_mlr in
-%   run_mlr_comparison_all.m. Same signature, same output struct, same
-%   helpers (softmax_rows, one_hot_labels, init_hist, record_hist).
-%
-%   Idea: Gauss-Seidel ACROSS feature chunks (keeps the per-feature
-%   preconditioning that wins on news20), Jacobi WITHIN a chunk so each
-%   chunk's gradient + score update are single matmuls (the BLAS-3
-%   efficiency Whole PG enjoys, which is what large K rewards). Active-set
-%   screening shrinks the effective d, independent of K.
-%
-%   Layout (matches the file): X n-by-d, W d-by-K (features x classes),
-%   full K-class softmax over columns, L_j = ||X(:,j)||^2/(2n)+lambda2.
-%
-%   Extra opts (all optional, sensible defaults):
-%     opts.chunkSize   features per chunk          (default 1024)
-%     opts.tau         within-chunk damping >= 1   (default 1.0)
-%     opts.screenEvery resync + rescreen period    (default 5; inf = off)
-%     opts.screenSlack admit if viol > lam1*slack  (default 1.0)
-%     opts.shuffle     permute cols before chunking (default true)
 
+
+% Gauss-Sidel across feature chunks
+% Jacobi within chunk
+% Active-set screening
+function out = featurewise_bpg_mlr(X, y, W, opts)
     X = sparse(X);
     n = size(X,1);
     d = size(X,2);
@@ -290,11 +275,15 @@ function out = featurewise_bpg_mlr(X, y, W, opts)
     timeLimit = opts.timeLimit;
     eta       = opts.eta;
 
-    chunkSize   = getf(opts,'chunkSize', 32);
-    tau         = getf(opts,'tau',1.0);
-    screenEvery = getf(opts,'screenEvery',5);
-    screenSlack = getf(opts,'screenSlack',1.0);
-    shuffle     = getf(opts,'shuffle',true);
+    density   = nnz(X) / max(1, n*d);
+    csDefault = min(d, min(256, max(1, round(1/max(density, eps)))));
+    fprintf('Chunksize: %.2e\n', csDefault);
+
+    chunkSize   = getf(opts,'chunkSize', csDefault); % features per chunk
+    tau         = getf(opts,'tau',1.0); % within-chunk damping >=1
+    screenEvery = getf(opts,'screenEvery',5); % resync + rescrene period
+    screenSlack = getf(opts,'screenSlack',1.0); %admit if viol > lam1*slack
+    shuffle     = getf(opts,'shuffle',true); % permute cols before chunking
 
     Y = one_hot_labels(y, K); % n x K
     Z = X * W; % n x K
@@ -381,127 +370,6 @@ end
 function v = getf(s, f, dflt)
     if isstruct(s) && isfield(s, f) && ~isempty(s.(f)), v = s.(f); else, v = dflt; end
 end
-
-function out = featurewise_bpg_mlr_old(X, y, W, opts)
-% Softmax/gradient computed on only nonzero rows of each column.
-% Per-epoch cost drops from O(d*n*K) to O(K*nnz(X))
-
-    X = sparse(X);
-    n = size(X,1);
-    d = size(X,2);
-    K = size(W,2);
-    lambda1 = opts.lambda1;
-    lambda2 = opts.lambda2;
-    timeLimit = opts.timeLimit;
-    eta = opts.eta;
-
-    Y = one_hot_labels(y, K);
-    Z = X * W;
-    % L = full(sum(X.^2, 1))' / (2*n);
-    L = full(sum(X.^2, 1))' / (2*n) + lambda2;
-    L = max(L, 1e-14);
-    tau = 2;
-
-    hist = init_hist();
-    t0 = tic;
-    hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
-    iterCount = 0;
-    stop = false;
-
-    for epoch = 1:opts.maxEpochs
-        colIdx = cell(d,1);
-        colVal = cell(d,1);
-        for j = 1:d
-            [colIdx{j}, ~, colVal{j}] = find(X(:,j));
-        end
-        alphaVec = eta ./ L;
-        for j = 1:d
-            alpha  = alphaVec(j);
-            oldRow = W(j,:);
-            idx = colIdx{j};
-            xv  = colVal{j};
-            if isempty(idx)
-                % gj = zeros(1, K);
-                gj = lambda2 * oldRow;
-            else
-                Zi = Z(idx,:);
-                Pi = softmax_rows(Zi); % softmax on support only
-                % gj = (xv' * (Pi - Y(idx,:))) / n;
-                gj = (xv' * (Pi - Y(idx,:))) / n + lambda2*oldRow;
-
-            end
-            % newRow = elastic_net_prox(oldRow - alpha * gj, alpha, lambda1, lambda2);
-            t = oldRow - alpha*gj;
-            newRow = sign(t).*max(abs(t)-alpha*lambda1, 0);
-            delta  = newRow - oldRow;
-            W(j,:) = newRow;
-            if ~isempty(idx) && any(delta)
-                Z(idx,:) = Zi + xv * delta;
-            end
-            iterCount = iterCount + 1;
-            if mod(j, 256) == 0 && toc(t0) >= timeLimit, stop = true; break; end
-        end
-        if stop || mod(epoch, opts.evalEvery) == 0 || epoch == opts.maxEpochs
-            hist = record_hist(hist, y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
-            maybe_print(opts, 'featurewise', epoch, hist.obj(end));
-        end
-        if stop || toc(t0) >= timeLimit, break; end
-    end
-
-    out.W = W;
-    out.hist = hist;
-    out.L = L;
-end
-
-
-% function out = featurewise_bpg_mlr(X, y, W, opts)
-%     n = size(X,1);
-%     d = size(X,2);
-%     K = size(W,2);
-%     lambda1 = opts.lambda1;
-%     lambda2 = opts.lambda2;
-%     timeLimit = opts.timeLimit;
-
-%     Y = one_hot_labels(y, K);
-%     Z = X * W;
-
-%     L = full(sum(X.^2, 1))' / (2*n);
-%     L = max(L, 1e-14);
-
-%     hist = init_hist();
-%     t0 = tic;
-%     hist = record_hist(hist, y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
-
-%     iterCount = 0;
-%     stop = false;
-%     for epoch = 1:opts.maxEpochs
-%         for j = 1:d
-%             P = softmax_rows(Z);
-%             gj = X(:,j)' * (P - Y) / n;
-
-%             alpha = opts.eta / L(j);
-%             oldRow = W(j,:);
-%             newRow = elastic_net_prox(oldRow - alpha * gj, alpha, lambda1, lambda2);
-%             delta = newRow - oldRow;
-
-%             W(j,:) = newRow;
-%             Z = Z + X(:,j) * delta;
-%             iterCount = iterCount + 1;
-
-%             if mod(j, 256) == 0 && toc(t0) >= timeLimit, stop = true; break; end
-%         end
-
-%         if stop || mod(epoch, opts.evalEvery) == 0 || epoch == opts.maxEpochs
-%             hist = record_hist(hist, y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
-%             maybe_print(opts, 'featurewise', epoch, hist.obj(end));
-%         end
-%         if stop || toc(t0) >= timeLimit, break; end
-%     end
-
-%     out.W = W;
-%     out.hist = hist;
-%     out.L = L;
-% end
 
 
 function out = classwise_bpg_mlr(X, y, W, opts)
@@ -605,9 +473,14 @@ function out = block_metric_prox_svrg_mlr(X, y, W, opts)
     % H = H.*sqrt(d);
     % H= full(sum(X.^2, 1))' / (2*sqrt(n));
     % H= max(H, 1e-14);
-    rowL1 = full(sum(abs(X), 2));  % n-by-1
-    H = 0.5 * full(max(abs(X) .* rowL1, [], 1))';
+    % rowL1 = full(sum(abs(X), 2));  % n-by-1
+    % H = 0.5 * full(max(abs(X) .* rowL1, [], 1))';
+    % H = max(H, 1e-14);
+    colMaxSq = full(max(X.^2, [], 1)).';
+    C        = full(max( (X.^2) * (1 ./ colMaxSq) ));
+    H        = (n * C) * colMaxSq;
     H = max(H, 1e-14);
+
     alpha = opts.etaSVRG ./ H(:);
 
 
@@ -626,6 +499,7 @@ function out = block_metric_prox_svrg_mlr(X, y, W, opts)
     % else
     %     m = floor(m/sqrt(n));
     % end
+    % m = n;
 
 
     iterCount = 0;
@@ -679,6 +553,7 @@ end
 function out = whole_prox_svrg_mlr(X, y, W, opts)
     n = size(X,1);
     K = size(W,2);
+    k = numel(unique(y));
     lambda1 = opts.lambda1;
     lambda2 = opts.lambda2;
     timeLimit = opts.timeLimit;
@@ -701,7 +576,7 @@ function out = whole_prox_svrg_mlr(X, y, W, opts)
     mu_h = opts.lambda2 / max(L);
     m = floor((1/(opts.etaSVRG*mu_h)+beta)/(1-2*beta)) + 1;
     % m = floor(m / sqrt(n));
-
+    % m = k;
 
     hist = init_hist();
     Z = X * W;
