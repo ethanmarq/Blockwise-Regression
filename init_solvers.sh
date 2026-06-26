@@ -16,9 +16,13 @@ run_mlr_comparison_all("/scratch/marque6/libsvm_data/poker.mat")
 run_mlr_comparison_all("/scratch/marque6/libsvm_data/shuttle.mat")
 run_mlr_comparison_all("/scratch/marque6/libsvm_data/rcv1_train.mat")
 
+run_mlr_comparison_all("/scratch/marque6/libsvm_data/rcv1_train.mat", struct('outDir', 'svrg-rcv1_train'))
+
 ###===###
 # Multi-response Linear Regression
 salloc --mem=128gb --cpus-per-task=32 --time=08:00:00
 module load matlab
 matlab -nodisplay
 compare_linear_regression("/scratch/marque6/libsvm_data/cadata.mat", struct('outDir', 'mrlr-cadata'))
+compare_linear_regression("/scratch/marque6/libsvm_data/triazines.mat", struct('outDir', 'mrlr-triazines'))
+compare_linear_regression("/scratch/marque6/libsvm_data/pyrim.mat", struct('outDir', 'mrlr-pyrim'))
