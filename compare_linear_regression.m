@@ -38,14 +38,20 @@ function results = compare_linear_regression(matFile, opts)
     results.matFile = matFile;
     results.datasetName = datasetName;
 
-    fprintf('\n[1/3] Running feature-wise cyclic BPG...\n');
+    fprintf('\n[1/5] Running feature-wise cyclic BPG...\n');
     results.featurewise = featurewise_bpg_mlr(X, Y, W0, opts);
 
-    fprintf('\n[2/3] Running class-wise cyclic BPG...\n');
+    fprintf('\n[2/5] Running class-wise cyclic BPG...\n');
     results.classwise = classwise_bpg_mlr(X, Y, W0, opts);
 
-    fprintf('\n[3/3] Running whole-matrix proximal gradient...\n');
+    fprintf('\n[3/5] Running whole-matrix proximal gradient...\n');
     results.whole_pg = whole_prox_gradient_mlr(X, Y, W0, opts);
+
+    fprintf('\n[4/5] Running block-metric Prox-SVRG...\n');
+    results.block_metric_prox_svrg = block_metric_prox_svrg_mlr(X, Y, W0, opts);
+
+    fprintf('\n[5/5] Running whole-matrix Prox-SVRG...\n');
+    results.whole_prox_svrg = whole_prox_svrg_mlr(X, Y, W0, opts);
 
     save_histories_and_plots(results, opts.outDir);
 
@@ -59,13 +65,15 @@ function results = compare_linear_regression(matFile, opts)
     fprintf('\nDone. Results saved to folder: %s\n', opts.outDir);
 end
 
-
 function opts = fill_default_opts(opts)
     opts = set_default(opts, 'lambda1', 1e-2);
     opts = set_default(opts, 'lambda2', 1e-1);
     opts = set_default(opts, 'maxEpochs', 500);
     opts = set_default(opts, 'maxIterWhole', 500);
+    opts = set_default(opts, 'maxEpochsSVRG', 100);
+    opts = set_default(opts, 'innerSVRG', []);
     opts = set_default(opts, 'eta', 1.0);
+    opts = set_default(opts, 'etaSVRG', 0.1);
     opts = set_default(opts, 'timeLimit', 60);
     opts = set_default(opts, 'maxSamples', 100000);
     opts = set_default(opts, 'standardize', true);
@@ -75,7 +83,6 @@ function opts = fill_default_opts(opts)
     opts = set_default(opts, 'evalEvery', 1);
     opts = set_default(opts, 'verbose', true);
 end
-
 
 function opts = set_default(opts, name, value)
     if ~isfield(opts, name) || isempty(opts.(name))
@@ -175,65 +182,185 @@ end
 
 
 function out = featurewise_bpg_mlr(X, Y, W, opts)
-% O(K*nnz(A))
+%FEATUREWISE_BPG_MLR  Chunked + screened feature-wise block prox-grad (MRLR).
+%
+%   Gauss-Seidel ACROSS feature chunks (keeps the per-feature preconditioning
+%   that wins on sparse high-d data), Jacobi WITHIN a chunk so each chunk's
+%   gradient and score update are single matmuls (BLAS-3 efficiency that large
+%   K rewards). Active-set screening shrinks the effective d, independent of K.
+%
+%   Summed-form least-squares layout: A = X (n x d), W (d x K), residual
+%   R = A*W - Y, feature-block constants L_j = ||A(:,j)||^2 + lambda2 (the
+%   ridge is folded into the smooth part, so the within-chunk prox is a plain
+%   soft-threshold).
+%
+%   Extra opts (all optional, sensible defaults):
+%     opts.chunkSize   features per chunk          (default 32)
+%     opts.tau         within-chunk damping >= 1   (default 1.0)
+%     opts.screenEvery resync + rescreen period    (default 5; inf = off)
+%     opts.screenSlack admit if viol > lam1*slack  (default 1.0)
+%     opts.shuffle     permute cols before chunking (default true)
 
     X = sparse(X);
+    n = size(X,1);
     d = size(X,2);
-    lambda1 = opts.lambda1;
-    lambda2 = opts.lambda2;
-    timeLimit = opts.timeLimit;
-    eta = opts.eta;
 
-    Z = X * W;
-    L = full(sum(X.^2, 1))' + lambda2;
+    lambda1   = opts.lambda1;
+    lambda2   = opts.lambda2;
+    timeLimit = opts.timeLimit;
+    eta       = opts.eta;
+
+    chunkSize   = getf(opts, 'chunkSize', 1);
+    tau         = getf(opts, 'tau', 1.0);
+    screenEvery = getf(opts, 'screenEvery', 5);
+    screenSlack = getf(opts, 'screenSlack', 1.0);
+    shuffle     = getf(opts, 'shuffle', true);
+
+    Z = X * W;   % n x K
+
+    L = full(sum(X.^2, 1)).' + lambda2; % d x 1
     L = max(L, 1e-14);
+    alphaVec = eta ./ (tau .* L);    % d x 1
 
     hist = init_hist();
     t0 = tic;
     hist = record_hist(hist, Y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
     iterCount = 0;
-    stop = false;
+
+    active  = true(d,1);
+    chunks  = {}; urows = {};
+    rebuild = true;
 
     for epoch = 1:opts.maxEpochs
-        colIdx = cell(d,1);
-        colVal = cell(d,1);
-        for j = 1:d
-            [colIdx{j}, ~, colVal{j}] = find(X(:,j));
+        % periodic exact resync of Z + KKT screening of the working set
+        if isfinite(screenEvery) && mod(epoch-1, screenEvery) == 0
+            Z = X * W; % kill incremental drift
+            Gfull = X.' * (Z - Y) + lambda2 * W; % d x K  smooth gradient
+            viol  = max(abs(Gfull), [], 2); % d x 1  KKT slack
+            active = any(W ~= 0, 2) | (viol > lambda1 * screenSlack);
+            rebuild = true;
         end
-        alphaVec = eta ./ L;
-        for j = 1:d
-            alpha  = alphaVec(j);
-            oldRow = W(j,:);
-            idx = colIdx{j};
-            xv  = colVal{j};
-            if isempty(idx)
-                gj = lambda2 * oldRow;
-            else
-                Zi = Z(idx,:);
-                Ri = Zi - Y(idx,:);
-                gj = (xv' * Ri) + lambda2 * oldRow; % = A(:,j)'(AW - Y) + lambda2*Wj
+
+        % rebuild chunk index sets over active features
+        if rebuild
+            ac = find(active);
+            if shuffle, ac = ac(randperm(numel(ac))); end
+            nC = max(1, ceil(numel(ac)/chunkSize));
+            chunks = cell(1,nC); urows = cell(1,nC);
+            for c = 1:nC
+                cols = ac((c-1)*chunkSize+1 : min(c*chunkSize, numel(ac)));
+                chunks{c} = cols;
+                urows{c}  = find(any(X(:,cols) ~= 0, 2)); % union support
             end
-            t = oldRow - alpha*gj;
-            newRow = sign(t).*max(abs(t)-alpha*lambda1, 0); % prox
-            delta  = newRow - oldRow;
-            W(j,:) = newRow;
-            if ~isempty(idx) && any(delta)
-                Z(idx,:) = Zi + xv * delta;
-            end
+            rebuild = false;
+        end
+
+        % Gauss-Seidel sweep over chunks
+        stop = false;
+        for c = 1:numel(chunks)
+            cols = chunks{c};  r = urows{c};
+            if isempty(cols) || isempty(r), continue; end
+
+            Zr = Z(r,:); % |r| x K
+            R  = Zr - Y(r,:); % residual (least squares)
+            Xc = X(r, cols); % |r| x |cols| sparse
+
+            G    = (Xc.' * R) + lambda2 * W(cols,:); % |cols| x K, ONE matmul
+            a    = alphaVec(cols); % |cols| x 1
+            Wold = W(cols,:);
+            Tt   = Wold - a .* G; % per-feature step
+            Wnew = sign(Tt) .* max(abs(Tt) - a .* lambda1, 0); % soft-threshold
+
+            dW        = Wnew - Wold;
+            W(cols,:) = Wnew;
+            Z(r,:)    = Zr + Xc * dW; % score update, ONE matmul
+
             iterCount = iterCount + 1;
-            if mod(j, 256) == 0 && toc(t0) >= timeLimit, stop = true; break; end
+            if toc(t0) >= timeLimit, stop = true; break; end
         end
-        if stop || mod(epoch, opts.evalEvery) == 0 || epoch == opts.maxEpochs
-            hist = record_hist(hist, Y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
-            maybe_print(opts, 'featurewise', epoch, hist.obj(end));
+
+        hist = record_hist(hist, Y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
+        if opts.verbose
+            fprintf('%-16s epoch = %4d, obj = %.8e, active = %d\n', ...
+                    'feat-chunk', epoch, hist.obj(end), nnz(active));
         end
         if stop || toc(t0) >= timeLimit, break; end
     end
 
-    out.W = W;
-    out.hist = hist;
-    out.L = L;
+    out.W     = W;
+    out.hist  = hist;
+    out.L     = L;
+    out.alpha = alphaVec;
+    out.info  = struct('active_final', nnz(active), 'nnz_W', nnz(W), ...
+                       'epochs', epoch, 'chunkSize', chunkSize, 'tau', tau);
 end
+
+
+function v = getf(s, f, dflt)
+    if isstruct(s) && isfield(s, f) && ~isempty(s.(f)), v = s.(f); else, v = dflt; end
+end
+
+
+% function out = featurewise_bpg_mlr(X, Y, W, opts)
+% % O(K*nnz(A))
+
+%     X = sparse(X);
+%     d = size(X,2);
+%     lambda1 = opts.lambda1;
+%     lambda2 = opts.lambda2;
+%     timeLimit = opts.timeLimit;
+%     eta = opts.eta;
+
+%     Z = X * W;
+%     L = full(sum(X.^2, 1))' + lambda2;
+%     L = max(L, 1e-14);
+
+%     hist = init_hist();
+%     t0 = tic;
+%     hist = record_hist(hist, Y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
+%     iterCount = 0;
+%     stop = false;
+
+%     for epoch = 1:opts.maxEpochs
+%         colIdx = cell(d,1);
+%         colVal = cell(d,1);
+%         for j = 1:d
+%             [colIdx{j}, ~, colVal{j}] = find(X(:,j));
+%         end
+%         alphaVec = eta ./ L;
+%         for j = 1:d
+%             alpha  = alphaVec(j);
+%             oldRow = W(j,:);
+%             idx = colIdx{j};
+%             xv  = colVal{j};
+%             if isempty(idx)
+%                 gj = lambda2 * oldRow;
+%             else
+%                 Zi = Z(idx,:);
+%                 Ri = Zi - Y(idx,:);
+%                 gj = (xv' * Ri) + lambda2 * oldRow; % = A(:,j)'(AW - Y) + lambda2*Wj
+%             end
+%             t = oldRow - alpha*gj;
+%             newRow = sign(t).*max(abs(t)-alpha*lambda1, 0); % prox
+%             delta  = newRow - oldRow;
+%             W(j,:) = newRow;
+%             if ~isempty(idx) && any(delta)
+%                 Z(idx,:) = Zi + xv * delta;
+%             end
+%             iterCount = iterCount + 1;
+%             if mod(j, 256) == 0 && toc(t0) >= timeLimit, stop = true; break; end
+%         end
+%         if stop || mod(epoch, opts.evalEvery) == 0 || epoch == opts.maxEpochs
+%             hist = record_hist(hist, Y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
+%             maybe_print(opts, 'featurewise', epoch, hist.obj(end));
+%         end
+%         if stop || toc(t0) >= timeLimit, break; end
+%     end
+
+%     out.W = W;
+%     out.hist = hist;
+%     out.L = L;
+% end
 
 
 function out = classwise_bpg_mlr(X, Y, W, opts)
@@ -318,6 +445,107 @@ function out = whole_prox_gradient_mlr(X, Y, W, opts)
     out.alpha = alpha;
 end
 
+function out = block_metric_prox_svrg_mlr(X, Y, W, opts)
+    n = size(X,1);
+    lambda1 = opts.lambda1;
+    lambda2 = opts.lambda2;
+    timeLimit = opts.timeLimit;
+    etaSVRG = opts.etaSVRG;
+
+    if isempty(opts.innerSVRG), m = 2*n; else, m = opts.innerSVRG; end
+
+    H = n * full(max(X.^2, [], 1))'; % d-by-1
+    H = max(H, 1e-14);
+    alpha = etaSVRG ./ H; % d-by-1, broadcasts across the K columns
+
+    hist = init_hist();
+    Z = X * W;
+    t0 = tic;
+    hist = record_hist(hist, Y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
+
+    iterCount = 0;
+    stop = false;
+    for epoch = 1:opts.maxEpochsSVRG
+        Wsnap = W;
+        fullGradSnap = X' * (X * Wsnap - Y);
+
+        for t = 1:m
+            i  = randi(n);
+            xi = X(i,:); % 1-by-d
+            ri  = xi * W;  % 1-by-K  (current prediction)
+            ris = xi * Wsnap; % 1-by-K  (snapshot prediction)
+            v = n * (xi' * (ri - ris)) + fullGradSnap; % d-by-K
+
+            A = W - alpha .* v;
+            W = sign(A) .* max(abs(A) - alpha*lambda1, 0) ./ (1 + alpha*lambda2);
+
+            iterCount = iterCount + 1;
+            if mod(t, 1000) == 0 && toc(t0) >= timeLimit, stop = true; break; end
+        end
+
+        Z = X * W;
+        hist = record_hist(hist, Y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
+        maybe_print(opts, 'bm-prox-svrg', epoch, hist.obj(end));
+        if stop || toc(t0) >= timeLimit, break; end
+    end
+
+    out.W = W;
+    out.hist = hist;
+    out.H = H;
+    out.innerSVRG = m;
+end
+
+
+function out = whole_prox_svrg_mlr(X, Y, W, opts)
+    n = size(X,1);
+    lambda1 = opts.lambda1;
+    lambda2 = opts.lambda2;
+    timeLimit = opts.timeLimit;
+    etaSVRG = opts.etaSVRG;
+
+    if isempty(opts.innerSVRG), m = 2*n; else, m = opts.innerSVRG; end
+
+    L = n * max(full(sum(X.^2, 2)));
+    L = max(L, 1e-14);
+    alpha = etaSVRG / L;
+
+    hist = init_hist();
+    Z = X * W;
+    t0 = tic;
+    hist = record_hist(hist, Y, W, Z, lambda1, lambda2, 0, toc(t0), 0);
+
+    iterCount = 0;
+    stop = false;
+    for epoch = 1:opts.maxEpochsSVRG
+        Wsnap = W;
+        fullGradSnap = X' * (X * Wsnap - Y);
+ 
+        for t = 1:m
+            i  = randi(n);
+            xi = X(i,:);
+            ri  = xi * W;
+            ris = xi * Wsnap;
+            v = n * (xi' * (ri - ris)) + fullGradSnap;
+
+            W = elastic_net_prox(W - alpha * v, alpha, lambda1, lambda2);
+
+            iterCount = iterCount + 1;
+            if mod(t, 1000) == 0 && toc(t0) >= timeLimit, stop = true; break; end
+        end
+
+        Z = X * W;
+        hist = record_hist(hist, Y, W, Z, lambda1, lambda2, epoch, toc(t0), iterCount);
+        maybe_print(opts, 'whole-svrg', epoch, hist.obj(end));
+        if stop || toc(t0) >= timeLimit, break; end
+    end
+
+    out.W = W;
+    out.hist = hist;
+    out.L = L;
+    out.alpha = alpha;
+    out.innerSVRG = m;
+end
+
 
 function Wp = elastic_net_prox(A, alpha, lambda1, lambda2)
     Wp = soft_threshold(A, alpha * lambda1) / (1 + alpha * lambda2);
@@ -377,8 +605,8 @@ end
 
 
 function save_histories_and_plots(results, outDir)
-    methods = {'featurewise', 'classwise', 'whole_pg'};
-    labels = {'Feature-wise BPG', 'Class-wise BPG', 'Whole PG'};
+    methods = {'featurewise', 'classwise', 'whole_pg', 'block_metric_prox_svrg', 'whole_prox_svrg'};
+    labels = {'Feature-wise BPG', 'Class-wise BPG', 'Whole PG', 'Block-Metric Prox-SVRG', 'Whole Prox-SVRG'};
 
     for m = 1:numel(methods)
         method = methods{m};
