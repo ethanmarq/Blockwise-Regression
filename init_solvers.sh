@@ -23,6 +23,12 @@ run_mlr_comparison_all("/scratch/marque6/libsvm_data/rcv1_train.mat", struct('ou
 salloc --mem=128gb --cpus-per-task=32 --time=08:00:00
 module load matlab
 matlab -nodisplay
+compare_linear_regression("/scratch/marque6/libsvm_data/usps_regression.mat", struct('outDir', 'mrlr-usps'))
+compare_linear_regression("/scratch/marque6/libsvm_data/news20_regression.mat", struct('outDir', 'mrlr-news20'))
+compare_linear_regression("/scratch/marque6/libsvm_data/aloi_regression.mat", struct('outDir', 'mrlr-aloi'))
+compare_linear_regression("/scratch/marque6/libsvm_data/rcv1_regression.mat", struct('outDir', 'mrlr-rcv1_train'))
+compare_linear_regression("/scratch/marque6/libsvm_data/emissions.mat", struct('outDir', 'mrlr-emissiosn'))
+compare_linear_regression("/scratch/marque6/libsvm_data/pakWheels.mat", struct('outDir', 'mrlr-pakwheels'))
 compare_linear_regression("/scratch/marque6/libsvm_data/cadata.mat", struct('outDir', 'mrlr-cadata'))
 compare_linear_regression("/scratch/marque6/libsvm_data/triazines.mat", struct('outDir', 'mrlr-triazines'))
 compare_linear_regression("/scratch/marque6/libsvm_data/pyrim.mat", struct('outDir', 'mrlr-pyrim'))

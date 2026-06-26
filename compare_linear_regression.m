@@ -74,7 +74,7 @@ function opts = fill_default_opts(opts)
     opts = set_default(opts, 'innerSVRG', []); %[]
     opts = set_default(opts, 'eta', 1.0);
     opts = set_default(opts, 'etaSVRG', 0.1);
-    opts = set_default(opts, 'timeLimit', 60);
+    opts = set_default(opts, 'timeLimit', 20);
     opts = set_default(opts, 'maxSamples', 100000);
     opts = set_default(opts, 'standardize', true);
     opts = set_default(opts, 'addIntercept', false);
@@ -195,7 +195,7 @@ function out = featurewise_bpg_mlr(X, Y, W, opts)
     eta       = opts.eta;
 
     density   = nnz(X) / max(1, n*d);
-    csDefault = min(d, min(256, max(1, round(1/max(density, eps)))));
+    csDefault = min(d, min(128, max(1, round(1/max(density, eps)))));
     fprintf('Chunksize: %.2e\n', csDefault);
 
     chunkSize   = getf(opts,'chunkSize', csDefault); % features per chunk
