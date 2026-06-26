@@ -449,8 +449,8 @@ function out = block_metric_prox_svrg_mlr(X, Y, W, opts)
     % H = max(H, 1e-14);
 
     colMaxSq = full(max(X.^2, [], 1)).';
-    C        = full(max( (X.^2) * (1 ./ colMaxSq) ));
-    H        = (n * C) * colMaxSq;
+    C = full(max( (X.^2) * (1 ./ colMaxSq) ));
+    H = (n * C) * colMaxSq;
     H = max(H, 1e-14);
     alpha = etaSVRG ./ H; % d-by-1, broadcasts across the K columns
 
